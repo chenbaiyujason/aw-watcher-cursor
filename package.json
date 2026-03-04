@@ -34,6 +34,10 @@
             {
                 "command": "extension.reload",
                 "title": "Reload ActivityWatch"
+            },
+            {
+                "command": "extension.showAgentCommandMapping",
+                "title": "Show ActivityWatch Agent Command Mapping"
             }
         ],
         "configuration": {
@@ -44,6 +48,63 @@
                     "type": "number",
                     "default": 1,
                     "description": "Controls the maximum number of hearbeats sent per second."
+                },
+                "aw-watcher-vscode.pulseTimeSec": {
+                    "type": "number",
+                    "default": 20,
+                    "description": "Controls heartbeat merge window in seconds."
+                },
+                "aw-watcher-vscode.enableAgentReport": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable sending Cursor agent activity events."
+                },
+                "aw-watcher-vscode.enableCommitArchive": {
+                    "type": "boolean",
+                    "default": true,
+                    "description": "Enable recording full git commit archive events."
+                },
+                "aw-watcher-vscode.commitBackfillCount": {
+                    "type": "number",
+                    "default": 20,
+                    "description": "How many recent commits should be backfilled at startup."
+                },
+                "aw-watcher-vscode.includeAuthorPII": {
+                    "type": "boolean",
+                    "default": false,
+                    "description": "Include git author name and email in commit archive."
+                },
+                "aw-watcher-vscode.mappingVersion": {
+                    "type": "string",
+                    "default": "v1",
+                    "description": "Version label for agent command mapping."
+                },
+                "aw-watcher-vscode.agentCommandMapping": {
+                    "type": "object",
+                    "default": {
+                        "panelOpen": [
+                            "cursor.agent.open",
+                            "cursor.chat.open"
+                        ],
+                        "taskStart": [
+                            "cursor.agent.run",
+                            "cursor.chat.send",
+                            "cursor.agent.ask"
+                        ],
+                        "taskEnd": [
+                            "cursor.agent.stop",
+                            "cursor.chat.stop"
+                        ],
+                        "patchApply": [
+                            "cursor.agent.apply",
+                            "cursor.chat.apply"
+                        ],
+                        "patchReject": [
+                            "cursor.agent.reject",
+                            "cursor.chat.reject"
+                        ]
+                    },
+                    "description": "Agent command mapping object. Each key is an array of command patterns."
                 }
             }
         }
@@ -53,12 +114,16 @@
         "watch": "tsc -watch -p ./",
         "postinstall": "node ./node_modules/vscode/bin/install",
         "test": "npm run compile && node ./node_modules/vscode/bin/test",
-        "test:mocha": "npm run compile && node ./node_modules/mocha/bin/mocha ./out/test/extension.test.js",
-        "vscode:prepublish": "npm run compile"
+        "test:mocha": "npm run compile && node ./node_modules/mocha/bin/mocha \"./out/src/test/**/*.test.js\"",
+        "vscode:prepublish": "npm run compile",
+        "report:project": "npm run compile && node ./out/scripts/report-project.js",
+        "report:agent": "npm run compile && node ./out/scripts/report-agent.js",
+        "report:commits": "npm run compile && node ./out/scripts/report-commits.js"
     },
     "devDependencies": {
         "@types/mocha": "^2.2.42",
         "@types/node": "^7.10.11",
+        "@vscode/vsce": "^3.7.1",
         "mocha": "^8.2.1",
         "tslint": "^5.20.1",
         "typescript": "^4.1.3",

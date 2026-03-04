@@ -13,6 +13,8 @@ Sends following data to ActivityWatch:
 - programming language
 - current file name
 - current Git branch
+- Cursor Agent activity events (panel open, task start/end, patch apply/reject)
+- Git commit summary archive events (`git.commit.archive`) with commit hash/title/description
 
 Currently VS Code extensions don't support getting file/project names for non-editable files, therefore this results in the value "unknown" for those properties. (For instance when opening logo.png this happens)
 
@@ -35,10 +37,32 @@ Use this in case VS Code has been started before the AW server.
 This extension adds the following settings:
 
 - `aw-watcher-vscode.maxHeartbeatsPerSec`: Controls the maximum number of heartbeats sent per second.
+- `aw-watcher-vscode.pulseTimeSec`: Controls AW heartbeat merge window in seconds.
+- `aw-watcher-vscode.enableAgentReport`: Enable or disable Cursor agent activity reporting.
+- `aw-watcher-vscode.enableCommitArchive`: Enable or disable full git commit archive reporting.
+- `aw-watcher-vscode.commitBackfillCount`: Number of recent commits to backfill on startup.
+- `aw-watcher-vscode.includeAuthorPII`: Whether to include commit author name/email.
+- `aw-watcher-vscode.mappingVersion`: Agent command mapping version tag.
+- `aw-watcher-vscode.agentCommandMapping`: Command mapping object for agent lifecycle events.
 <!--
 TODO:
 * `aw-watcher-vscode.enable`: enable/disable this extension
 -->
+
+## Reporting scripts
+
+You can generate JSON reports from local ActivityWatch data:
+
+- `npm run report:project` - project activity report
+- `npm run report:agent` - Cursor agent activity report
+- `npm run report:commits` - full commit archive report with query indexes
+
+Optional flags:
+
+- `--hours=<number>` lookback window (default: 24)
+- `--output=<path>` output file path
+
+For detailed fields and metrics, see [`docs/reporting.md`](docs/reporting.md).
 
 ## Error reporting
 
