@@ -1,16 +1,16 @@
 {
-    "name": "aw-watcher-vscode",
-    "displayName": "aw-watcher-vscode",
+    "name": "aw-watcher-cursor",
+    "displayName": "aw-watcher-cursor",
     "description": "Editor watcher for ActivityWatch, the free and open-source automated time tracker.",
-    "version": "0.5.0",
+    "version": "0.6.0",
     "repository": {
         "type": "git",
-        "url": "https://github.com/ActivityWatch/aw-watcher-vscode"
+        "url": "https://github.com/chenbaiyujason/aw-watcher-cursor"
     },
     "publisher": "activitywatch",
     "author": "ActivityWatch Developers",
     "bugs": {
-        "url": "https://github.com/ActivityWatch/aw-watcher-vscode/issues"
+        "url": "https://github.com/chenbaiyujason/aw-watcher-cursor/issues"
     },
     "engines": {
         "vscode": "^1.23.0"
