@@ -15,7 +15,6 @@ export interface ICommonEventContext {
 // 项目活动事件数据。
 export interface IProjectEventData extends ICommonEventContext {
     editorSessionId: string;
-    trigger: 'selection' | 'active-editor' | 'periodic' | 'manual';
 }
 
 // Agent 任务类型，用于统计分布。
@@ -77,7 +76,8 @@ export function createAgentEvent(data: IAgentEventData): IEvent {
 export function createCommitArchiveEvent(data: ICommitArchiveEventData): IEvent {
     return {
         timestamp: new Date(),
-        duration: 0,
+        // commit 是离散事件，给最小持续时长方便时间线可见。
+        duration: 1,
         data
     };
 }

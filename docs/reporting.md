@@ -23,7 +23,6 @@ All events follow the ActivityWatch schema:
 - `branch`
 - `workspaceId`
 - `editorSessionId`
-- `trigger` (`selection` | `active-editor` | `periodic` | `manual`)
 
 ### Agent Event Data
 
@@ -68,8 +67,7 @@ All events follow the ActivityWatch schema:
 - Active editor changed.
 - Selection changed.
 - File save event.
-- Periodic heartbeat window exceeded.
-- File or branch changed.
+- Heartbeat interval exceeded or file/branch changed.
 
 ### Agent Events
 

@@ -46,12 +46,12 @@
             "properties": {
                 "aw-watcher-vscode.maxHeartbeatsPerSec": {
                     "type": "number",
-                    "default": 1,
+                    "default": 0.5,
                     "description": "Controls the maximum number of hearbeats sent per second."
                 },
                 "aw-watcher-vscode.pulseTimeSec": {
                     "type": "number",
-                    "default": 20,
+                    "default": 30,
                     "description": "Controls heartbeat merge window in seconds."
                 },
                 "aw-watcher-vscode.enableAgentReport": {

@@ -15,7 +15,6 @@ import {
     BUCKET_EVENT_TYPE_VSCODE,
     IAgentEventData,
     ICommonEventContext,
-    IProjectEventData,
     createAgentEvent,
     createCommitArchiveEvent,
     createProjectEvent,
@@ -54,6 +53,8 @@ type CommandExecuteHandler = (
 interface ICommandExecuteAPI {
     onDidExecuteCommand?: CommandExecuteHandler;
 }
+
+type EditorTriggerSource = 'selection' | 'active-editor' | 'save';
 
 interface IBucketInfo {
     id: string;
@@ -108,7 +109,9 @@ class ActivityWatchController {
     private _lastFilePath: string = '';
     private _lastBranch: string = '';
     private _lastEditorHeartbeatTime: number = 0;
+    private _lastSelectionEventTime: number = 0;
     private _editorSessionId: string = createSessionId('editor');
+    private _selectionDebounceMs: number = 2500;
 
     // Agent 状态缓存，用于串联 session 与任务耗时。
     private _agentSessionId: string = createSessionId('agent');
@@ -136,7 +139,7 @@ class ActivityWatchController {
         const subscriptions: Disposable[] = [];
         window.onDidChangeTextEditorSelection(() => this._onEditorEvent('selection'), this, subscriptions);
         window.onDidChangeActiveTextEditor(() => this._onEditorEvent('active-editor'), this, subscriptions);
-        workspace.onDidSaveTextDocument(() => this._onEditorEvent('periodic'), this, subscriptions);
+        workspace.onDidSaveTextDocument(() => this._onEditorEvent('save'), this, subscriptions);
         this._registerAgentCommandWatcher(subscriptions);
         this._disposable = Disposable.from(...subscriptions);
     }
@@ -186,8 +189,8 @@ class ActivityWatchController {
 
     private _loadConfigurations(): IWatcherConfig {
         const extConfigurations = workspace.getConfiguration('aw-watcher-vscode');
-        const maxHeartbeatsPerSec = extConfigurations.get<number>('maxHeartbeatsPerSec', 1);
-        const pulseTimeSec = extConfigurations.get<number>('pulseTimeSec', 20);
+        const maxHeartbeatsPerSec = extConfigurations.get<number>('maxHeartbeatsPerSec', 0.5);
+        const pulseTimeSec = extConfigurations.get<number>('pulseTimeSec', 30);
         const enableAgentReport = extConfigurations.get<boolean>('enableAgentReport', true);
         const enableCommitArchive = extConfigurations.get<boolean>('enableCommitArchive', true);
         const commitBackfillCount = extConfigurations.get<number>('commitBackfillCount', 20);
@@ -238,12 +241,19 @@ class ActivityWatchController {
         commandApi.onDidExecuteCommand((event: ICommandExecutionEvent) => this._onCommandExecuted(event.command), this, subscriptions);
     }
 
-    private _onEditorEvent(trigger: IProjectEventData['trigger']) {
+    private _onEditorEvent(trigger: EditorTriggerSource) {
         if (!this._bucketCreated || !this._shouldTrackEditorEvent()) {
             return;
         }
+        const now = Date.now();
+        if (trigger === 'selection' && now - this._lastSelectionEventTime < this._selectionDebounceMs) {
+            return;
+        }
+        if (trigger === 'selection') {
+            this._lastSelectionEventTime = now;
+        }
         const contextData = this._getCommonContext();
-        const curTime = Date.now();
+        const curTime = now;
         const heartbeatInterval = 1000 / this._config.maxHeartbeatsPerSec;
         const shouldSend = contextData.file !== this._lastFilePath ||
             contextData.branch !== this._lastBranch ||
@@ -260,8 +270,7 @@ class ActivityWatchController {
             language: contextData.language,
             branch: contextData.branch,
             workspaceId: contextData.workspaceId,
-            editorSessionId: this._editorSessionId,
-            trigger
+            editorSessionId: this._editorSessionId
         });
         this._sendHeartbeat(this._bucket.id, event);
     }
@@ -404,6 +413,15 @@ class ActivityWatchController {
             });
     }
 
+    // 非连续型事件（如 commit）使用 insertEvent，避免 heartbeat 合并影响可见性。
+    private _sendEvent(bucketId: string, event: IEvent) {
+        return this._client.insertEvent(bucketId, event)
+            .catch((err: Error) => {
+                console.error('sendEvent error:', err);
+                this._handleError('Error while sending event', true);
+            });
+    }
+
     // 注册仓库状态监听，用于捕获 HEAD 变化并归档 commit。
     private _registerCommitWatchers() {
         this._disposeRepoSubscriptions();
@@ -505,7 +523,7 @@ class ActivityWatchController {
                 body: details.body,
                 relatedAgentSessionId
             });
-            await this._sendHeartbeat(this._bucket.id, summaryEvent);
+            await this._sendEvent(this._bucket.id, summaryEvent);
         } catch (err) {
             const error = err as Error;
             this._handleError(`Commit archive failed for ${commitHash}: ${error.message}`);

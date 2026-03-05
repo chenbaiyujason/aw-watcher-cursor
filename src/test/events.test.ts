@@ -13,8 +13,7 @@ describe('events helpers', () => {
             language: 'typescript',
             branch: 'main',
             workspaceId: 'ws',
-            editorSessionId: 'editor_1',
-            trigger: 'manual'
+            editorSessionId: 'editor_1'
         });
         assert.ok(event.timestamp instanceof Date);
         assert.strictEqual(event.duration, 0);

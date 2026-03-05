@@ -10,7 +10,6 @@ interface IProjectEventData {
     branch: string;
     workspaceId: string;
     editorSessionId: string;
-    trigger: string;
 }
 
 interface IProjectAggregate {
