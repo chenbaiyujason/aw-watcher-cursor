@@ -12,9 +12,7 @@ import { execFile } from 'child_process';
 import { AWClient, IEvent } from '../aw-client-js/src/aw-client';
 import { API, GitExtension, Repository } from './git';
 import {
-    BUCKET_EVENT_TYPE_AGENT,
-    BUCKET_EVENT_TYPE_COMMIT,
-    BUCKET_EVENT_TYPE_EDITOR,
+    BUCKET_EVENT_TYPE_VSCODE,
     IAgentEventData,
     ICommonEventContext,
     IProjectEventData,
@@ -103,12 +101,8 @@ class ActivityWatchController {
     private _git: API | undefined;
     private _config: IWatcherConfig;
 
-    private _editorBucket: IBucketInfo;
-    private _agentBucket: IBucketInfo;
-    private _commitBucket: IBucketInfo;
-    private _editorBucketCreated: boolean = false;
-    private _agentBucketCreated: boolean = false;
-    private _commitBucketCreated: boolean = false;
+    private _bucket: IBucketInfo;
+    private _bucketCreated: boolean = false;
 
     // 编辑器状态缓存，用于去重和限流。
     private _lastFilePath: string = '';
@@ -130,23 +124,11 @@ class ActivityWatchController {
         const clientName = 'aw-watcher-vscode';
         const hostName = hostname();
         const bucketId = `${clientName}_${hostName}`;
-        this._editorBucket = {
-            id: `${bucketId}_editor`,
+        this._bucket = {
+            id: bucketId,
             hostName,
             clientName,
-            eventType: BUCKET_EVENT_TYPE_EDITOR
-        };
-        this._agentBucket = {
-            id: `${bucketId}_agent`,
-            hostName,
-            clientName,
-            eventType: BUCKET_EVENT_TYPE_AGENT
-        };
-        this._commitBucket = {
-            id: `${bucketId}_commit`,
-            hostName,
-            clientName,
-            eventType: BUCKET_EVENT_TYPE_COMMIT
+            eventType: BUCKET_EVENT_TYPE_VSCODE
         };
         this._client = new AWClient(clientName, { testing: false });
         this._config = this._loadConfigurations();
@@ -161,17 +143,7 @@ class ActivityWatchController {
 
     public init() {
         this._config = this._loadConfigurations();
-        this._ensureBucket(this._editorBucket, (created) => this._editorBucketCreated = created);
-        if (this._config.enableAgentReport) {
-            this._ensureBucket(this._agentBucket, (created) => this._agentBucketCreated = created);
-        } else {
-            this._agentBucketCreated = false;
-        }
-        if (this._config.enableCommitArchive) {
-            this._ensureBucket(this._commitBucket, (created) => this._commitBucketCreated = created);
-        } else {
-            this._commitBucketCreated = false;
-        }
+        this._ensureBucket(this._bucket, (created) => this._bucketCreated = created);
         this._initGit()
             .then((res) => {
                 this._git = res;
@@ -267,7 +239,7 @@ class ActivityWatchController {
     }
 
     private _onEditorEvent(trigger: IProjectEventData['trigger']) {
-        if (!this._editorBucketCreated) {
+        if (!this._bucketCreated || !this._shouldTrackEditorEvent()) {
             return;
         }
         const contextData = this._getCommonContext();
@@ -291,11 +263,11 @@ class ActivityWatchController {
             editorSessionId: this._editorSessionId,
             trigger
         });
-        this._sendHeartbeat(this._editorBucket.id, event);
+        this._sendHeartbeat(this._bucket.id, event);
     }
 
     private _onCommandExecuted(commandId: string) {
-        if (!this._config.enableAgentReport || !this._agentBucketCreated) {
+        if (!this._config.enableAgentReport || !this._bucketCreated) {
             return;
         }
         const eventName = this._mapCommandToAgentEvent(commandId);
@@ -332,7 +304,7 @@ class ActivityWatchController {
             latencyMs
         };
         const event = createAgentEvent(eventData);
-        this._sendHeartbeat(this._agentBucket.id, event);
+        this._sendHeartbeat(this._bucket.id, event);
     }
 
     private _mapCommandToAgentEvent(commandId: string): IAgentEventData['eventName'] | undefined {
@@ -350,6 +322,9 @@ class ActivityWatchController {
         }
         if (this._matchCommand(commandId, this._config.commandMapping.patchReject)) {
             return 'patch_reject';
+        }
+        if (this._isCursorAgentCommand(commandId)) {
+            return 'agent_command';
         }
         return undefined;
     }
@@ -415,7 +390,13 @@ class ActivityWatchController {
         return 'unknown';
     }
 
-    private _sendHeartbeat<T extends object>(bucketId: string, event: IEvent<T>) {
+    // 对 Cursor 命令做兜底捕获，避免映射遗漏导致漏记。
+    private _isCursorAgentCommand(commandId: string): boolean {
+        const lowerCommand = commandId.toLowerCase();
+        return lowerCommand.indexOf('cursor') !== -1 || lowerCommand.indexOf('anysphere') !== -1;
+    }
+
+    private _sendHeartbeat(bucketId: string, event: IEvent) {
         return this._client.heartbeat(bucketId, this._config.pulseTimeSec, event)
             .catch((err: Error) => {
                 console.error('sendHeartbeat error:', err);
@@ -450,7 +431,7 @@ class ActivityWatchController {
     }
 
     private _onRepositoryStateChanged(repository: Repository) {
-        if (!this._config.enableCommitArchive || !this._commitBucketCreated) {
+        if (!this._config.enableCommitArchive || !this._bucketCreated) {
             return;
         }
         const repoPath = repository.rootUri.fsPath;
@@ -468,7 +449,7 @@ class ActivityWatchController {
 
     // 启动时回补最近提交，避免扩展未运行期间的漏采。
     private _runCommitBackfill() {
-        if (!this._config.enableCommitArchive || !this._commitBucketCreated || !this._git) {
+        if (!this._config.enableCommitArchive || !this._bucketCreated || !this._git) {
             return;
         }
         this._git.repositories.forEach((repository) => {
@@ -524,7 +505,7 @@ class ActivityWatchController {
                 body: details.body,
                 relatedAgentSessionId
             });
-            await this._sendHeartbeat(this._commitBucket.id, summaryEvent);
+            await this._sendHeartbeat(this._bucket.id, summaryEvent);
         } catch (err) {
             const error = err as Error;
             this._handleError(`Commit archive failed for ${commitHash}: ${error.message}`);
@@ -610,20 +591,33 @@ class ActivityWatchController {
 
     private _getProjectFolder(): string {
         const editor = window.activeTextEditor;
-        if (!editor) {
-            return 'unknown';
+        if (editor) {
+            const workspaceFolder = workspace.getWorkspaceFolder(editor.document.uri);
+            if (workspaceFolder) {
+                return workspaceFolder.uri.fsPath;
+            }
         }
-        const workspaceFolder = workspace.getWorkspaceFolder(editor.document.uri);
-        return workspaceFolder ? workspaceFolder.uri.path : 'unknown';
+        const repository = this._getActiveRepository();
+        if (repository) {
+            return repository.rootUri.fsPath;
+        }
+        return 'unknown';
     }
 
     private _getWorkspaceId(): string {
         const editor = window.activeTextEditor;
-        if (!editor) {
-            return 'unknown';
+        if (editor) {
+            const workspaceFolder = workspace.getWorkspaceFolder(editor.document.uri);
+            if (workspaceFolder) {
+                return workspaceFolder.name;
+            }
         }
-        const workspaceFolder = workspace.getWorkspaceFolder(editor.document.uri);
-        return workspaceFolder ? workspaceFolder.name : 'unknown';
+        const repository = this._getActiveRepository();
+        if (repository) {
+            const pathParts = repository.rootUri.fsPath.split(/[\\/]/).filter((part) => part.length > 0);
+            return pathParts.length > 0 ? pathParts[pathParts.length - 1] : repository.rootUri.fsPath;
+        }
+        return 'unknown';
     }
 
     private _getFilePath(): string {
@@ -679,6 +673,15 @@ class ActivityWatchController {
             return 0;
         }
         return repository.state.workingTreeChanges.length + repository.state.indexChanges.length;
+    }
+
+    // 仅统计真实文件编辑器，避免 tasks/log/review 面板造成噪音和 unknown 项目。
+    private _shouldTrackEditorEvent(): boolean {
+        const editor = window.activeTextEditor;
+        if (!editor) {
+            return false;
+        }
+        return editor.document.uri.scheme === 'file';
     }
 
     private _handleError(err: string, isCritical: boolean = false): undefined {

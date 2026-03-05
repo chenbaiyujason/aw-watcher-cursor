@@ -1,9 +1,7 @@
 import { IEvent } from '../aw-client-js/src/aw-client';
 
 // AW bucket 的类型常量，保证上报事件语义稳定。
-export const BUCKET_EVENT_TYPE_EDITOR = 'app.editor.activity';
-export const BUCKET_EVENT_TYPE_AGENT = 'cursor.agent.activity';
-export const BUCKET_EVENT_TYPE_COMMIT = 'git.commit.archive';
+export const BUCKET_EVENT_TYPE_VSCODE = 'app.editor.activity';
 
 // 通用上下文，所有事件共享。
 export interface ICommonEventContext {
@@ -24,7 +22,7 @@ export interface IProjectEventData extends ICommonEventContext {
 export type AgentTaskKind = 'explain' | 'fix' | 'refactor' | 'test_gen' | 'ask' | 'unknown';
 
 // Agent 事件名称，覆盖基础生命周期。
-export type AgentEventName = 'panel_open' | 'task_start' | 'task_end' | 'patch_apply' | 'patch_reject';
+export type AgentEventName = 'panel_open' | 'task_start' | 'task_end' | 'patch_apply' | 'patch_reject' | 'agent_command';
 
 // Agent 事件数据。
 export interface IAgentEventData extends ICommonEventContext {
@@ -58,7 +56,7 @@ export interface ICommitArchiveEventData extends ICommonEventContext {
 }
 
 // 统一构造项目事件，避免散落拼字段。
-export function createProjectEvent(data: IProjectEventData): IEvent<IProjectEventData> {
+export function createProjectEvent(data: IProjectEventData): IEvent {
     return {
         timestamp: new Date(),
         duration: 0,
@@ -67,7 +65,7 @@ export function createProjectEvent(data: IProjectEventData): IEvent<IProjectEven
 }
 
 // 统一构造 Agent 事件，避免散落拼字段。
-export function createAgentEvent(data: IAgentEventData): IEvent<IAgentEventData> {
+export function createAgentEvent(data: IAgentEventData): IEvent {
     return {
         timestamp: new Date(),
         duration: 0,
@@ -76,7 +74,7 @@ export function createAgentEvent(data: IAgentEventData): IEvent<IAgentEventData>
 }
 
 // 统一构造 Commit 归档事件，方便后续报告脚本直接消费。
-export function createCommitArchiveEvent(data: ICommitArchiveEventData): IEvent<ICommitArchiveEventData> {
+export function createCommitArchiveEvent(data: ICommitArchiveEventData): IEvent {
     return {
         timestamp: new Date(),
         duration: 0,

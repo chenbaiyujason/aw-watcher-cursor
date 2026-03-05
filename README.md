@@ -8,13 +8,13 @@ The source code is available at https://github.com/ActivityWatch/aw-watcher-vsco
 
 ## Features
 
-Sends following data to ActivityWatch:
+Sends following data to ActivityWatch (single `vscode` tracker bucket):
 - current project name
 - programming language
 - current file name
 - current Git branch
-- Cursor Agent activity events (panel open, task start/end, patch apply/reject)
-- Git commit summary archive events (`git.commit.archive`) with commit hash/title/description
+- Cursor Agent activity events (panel open, task start/end, patch apply/reject, fallback command capture)
+- Git commit summary archive events with commit hash/title/description
 
 Currently VS Code extensions don't support getting file/project names for non-editable files, therefore this results in the value "unknown" for those properties. (For instance when opening logo.png this happens)
 

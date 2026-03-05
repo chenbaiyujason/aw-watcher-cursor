@@ -45,11 +45,16 @@ function isProjectEventData(data: Record<string, unknown>): data is IProjectEven
 
 async function findBucketId(client: AWClient, eventType: string): Promise<string> {
     const buckets = await client.getBuckets();
-    const bucketIds = Object.keys(buckets);
+    const bucketIds = Object.keys(buckets).sort();
+    const preferredIds = bucketIds.filter((bucketId) =>
+        buckets[bucketId].type === eventType && bucketId.indexOf('aw-watcher-vscode_') === 0
+    );
+    if (preferredIds.length > 0) {
+        return preferredIds[preferredIds.length - 1];
+    }
     for (let i = 0; i < bucketIds.length; i += 1) {
-        const bucketId = bucketIds[i];
-        if (buckets[bucketId].type === eventType) {
-            return bucketId;
+        if (buckets[bucketIds[i]].type === eventType) {
+            return bucketIds[i];
         }
     }
     throw new Error(`Bucket with type ${eventType} not found.`);

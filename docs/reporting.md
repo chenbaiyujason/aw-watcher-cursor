@@ -5,11 +5,7 @@ This document describes the reporting model for `aw-watcher-vscode`.
 ## Buckets
 
 - `app.editor.activity`
-  - Tracks coding context events from editor activity.
-- `cursor.agent.activity`
-  - Tracks Cursor agent lifecycle events inferred from command executions.
-- `git.commit.archive`
-  - Tracks git commit summary archive, including hash/title/description metadata.
+  - Single unified `vscode` tracker bucket for editor, agent and commit summary events.
 
 ## Event Schema
 
@@ -87,6 +83,11 @@ All events follow the ActivityWatch schema:
 - Triggered on repository HEAD change (`repository.state.onDidChange`).
 - Backfills recent commits at startup (`commitBackfillCount`).
 - Detailed file changes are not stored; use `commitHashFull` to query git on demand.
+
+### Noise Filtering
+
+- Editor events are recorded only for `file://` documents.
+- Cursor internal virtual tabs (`tasks`, `review`, logs) are excluded from editor heartbeat.
 
 ## Reporting Scripts
 
