@@ -10,14 +10,13 @@ The source code is available at https://github.com/chenbaiyujason/aw-watcher-cur
 
 Sends the following data to ActivityWatch using dedicated buckets instead of a single mixed timeline:
 
-- file focus dwell segments, so you can see how long you stayed on a file
-- file editing segments, so you can separate real typing time from reading time
-- project presence segments, so cross-file work still looks continuous on the timeline
+- file activity segments in a single `app.editor.activity` track
+- `activityKind` metadata on file activity events, so reading/dwelling (`dwell`) and active editing (`edit`) can still be distinguished without splitting into multiple buckets
 - Cursor Agent activity events (panel open, task start/end, patch apply/reject, fallback command capture)
 - Git commit summary archive events with commit hash/title/description
 - current project name, current file path, language, workspace and Git branch metadata where relevant
 
-The watcher uses heartbeats only for continuous signals such as file focus, file editing and project presence. Agent and commit events are sent as discrete events, which keeps the editor timeline smooth and prevents milestone events from breaking heartbeat merges.
+The watcher uses heartbeats only for continuous file activity. Agent and commit events are sent as discrete events, which keeps the editor timeline smooth and prevents milestone events from breaking heartbeat merges.
 
 Currently VS Code extensions don't support getting file/project names for some non-editable files, therefore this can still result in the value `unknown` for those properties.
 
@@ -40,11 +39,8 @@ Use this in case VS Code has been started before the AW server.
 This extension adds the following settings:
 
 - `aw-watcher-vscode.maxHeartbeatsPerSec`: Controls the maximum number of heartbeat refreshes sent per second for continuous signals.
-- `aw-watcher-vscode.pulseTimeSec`: Legacy alias for the file editing heartbeat merge window.
-- `aw-watcher-vscode.fileEditingPulseTimeSec`: Controls how long adjacent text-editing heartbeats can merge into one editing segment.
-- `aw-watcher-vscode.fileFocusPulseTimeSec`: Controls how long adjacent file-focus heartbeats can merge into one dwell segment.
-- `aw-watcher-vscode.projectPresencePulseTimeSec`: Controls how long adjacent project-presence heartbeats can merge into one project segment.
-- `aw-watcher-vscode.editingIdleTimeoutSec`: Keeps editing active for a short period after the last text change so intermittent typing still looks continuous.
+- `aw-watcher-vscode.pulseTimeSec`: Legacy alias for `fileActivityPulseTimeSec`.
+- `aw-watcher-vscode.fileActivityPulseTimeSec`: Controls how long adjacent file-activity heartbeats can merge into one segment.
 - `aw-watcher-vscode.textChangeDebounceMs`: Debounces immediate text-change refreshes to reduce noise during rapid typing.
 - `aw-watcher-vscode.enableAgentReport`: Enable or disable Cursor agent activity reporting.
 - `aw-watcher-vscode.enableCommitArchive`: Enable or disable git commit summary reporting.
@@ -61,9 +57,13 @@ TODO:
 
 You can generate JSON reports from local ActivityWatch data:
 
-- `npm run report:project` - file focus, file editing and project presence report
+- `npm run report:project` - file activity report with project/file/language aggregates and `activityKind` counts
 - `npm run report:agent` - Cursor agent activity report
 - `npm run report:commits` - full commit archive report with query indexes
+
+You can also push a recent synthetic timeline into a local ActivityWatch instance for UI validation:
+
+- `npm run push:test-timeline`
 
 Optional flags:
 

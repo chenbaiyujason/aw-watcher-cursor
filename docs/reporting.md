@@ -4,12 +4,9 @@ This document describes the reporting model for `aw-watcher-vscode`.
 
 ## Buckets
 
-- `com.activitywatch.cursor.file-focus`
-  - Continuous heartbeat bucket for file dwell / focus time.
 - `app.editor.activity`
-  - Continuous heartbeat bucket for real file editing time.
-- `com.activitywatch.cursor.project-presence`
-  - Continuous heartbeat bucket for cross-file project activity.
+  - Continuous heartbeat bucket for unified file activity in Cursor / VS Code.
+  - Reading / dwell and active editing are both stored here, distinguished by `activityKind`.
 - `com.activitywatch.cursor.agent.lifecycle`
   - Discrete Cursor Agent lifecycle events.
 - `com.activitywatch.cursor.git.commit`
@@ -23,29 +20,14 @@ All events follow the ActivityWatch schema:
 - `duration`: `0` for heartbeat events, `60` for commit marker events
 - `data`: event payload
 
-### File Focus Event Data
+### File Activity Event Data
 
 - `project`
 - `file`
 - `language`
-- `eventName` (`file_focus`)
-- `mode` (`focus`)
-
-### File Editing Event Data
-
-- `project`
-- `file`
-- `language`
-- `eventName` (`file_editing`)
-- `mode` (`editing`)
-
-### Project Presence Event Data
-
-- `project`
 - `branch`
 - `workspaceId`
-- `eventName` (`project_presence`)
-- `mode` (`active`)
+- `activityKind` (`dwell` | `edit`)
 
 ### Agent Event Data
 
@@ -85,23 +67,16 @@ All events follow the ActivityWatch schema:
 
 ## Trigger Conditions
 
-### File Focus Events
+### File Activity Events
 
 - Active editor changed.
 - Selection changed.
-- Timer heartbeat while the same file remains focused and the window stays active.
-- Window blur stops future focus heartbeats.
-
-### File Editing Events
-
-- `workspace.onDidChangeTextDocument` starts or refreshes the editing window.
-- Timer heartbeat keeps the file editing segment alive until `editingIdleTimeoutSec` is exceeded.
-- File switches create a new editing segment because the heartbeat `data` changes.
-
-### Project Presence Events
-
-- Any active file focus or file editing activity refreshes project presence.
-- Cross-file work keeps merging as long as `project`, `workspaceId` and `branch` remain identical.
+- Timer heartbeat while the same file remains active and the window stays focused.
+- `workspace.onDidChangeTextDocument` refreshes the file activity and marks the activity as `edit`.
+- Save refreshes the file activity and also marks the activity as `edit`.
+- A short edit idle window keeps adjacent heartbeats labeled as `edit` for a few seconds after the last text change.
+- File switches or `activityKind` changes create a new merged segment because the heartbeat `data` changes.
+- Window blur stops future file activity heartbeats until focus returns.
 
 ### Agent Events
 
@@ -119,17 +94,24 @@ All events follow the ActivityWatch schema:
 
 - Continuous editor events are recorded only for `file://` documents.
 - Cursor internal virtual tabs (`tasks`, `review`, logs) are excluded from editor heartbeat.
-- Pure reading time and pure typing time are stored separately, so dwell does not inflate editing duration.
+- Reading and editing share one bucket, but `activityKind` keeps them distinguishable without requiring multiple continuous tracks.
 
 ## Reporting Scripts
 
 - `npm run report:project`
-  - Outputs separate aggregates for `fileFocus`, `fileEditing` and `projectPresence`.
+  - Outputs file activity aggregates for `project`, `file`, `language` and `activityKind`.
   - Includes both event counts and total merged duration in seconds.
 - `npm run report:agent`
   - Outputs aggregate counts by event/task kind/outcome/command.
 - `npm run report:commits`
   - Outputs `project -> commits`, `commitHash -> summary`, `agentSession -> commits` indexes.
+
+## Test Timeline Script
+
+- `npm run push:test-timeline`
+  - Rebuilds dedicated test buckets in a local ActivityWatch instance.
+  - Pushes a recent synthetic Cursor timeline using the same bucket names, event schema and timing defaults as the extension.
+  - The synthetic file activity timeline can include both `dwell` and `edit` segments inside the same `app.editor.activity` bucket.
 
 Both scripts support:
 
