@@ -1,6 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { AWClient, IEvent } from '../aw-client-js/src/aw-client';
+import { BUCKET_EVENT_TYPE_AGENT_LIFECYCLE, WATCHER_CLIENT_NAME } from '../src/events';
 
 interface IAgentEventData {
     [key: string]: unknown;
@@ -30,7 +31,7 @@ interface IReportOutput {
 }
 
 function getArgValue(flag: string): string | undefined {
-    const found = process.argv.find((item) => item.indexOf(`${flag}=`) === 0);
+    const found = process.argv.find((item: string) => item.indexOf(`${flag}=`) === 0);
     return found ? found.split('=').slice(1).join('=') : undefined;
 }
 
@@ -43,11 +44,11 @@ function isAgentEventData(data: Record<string, unknown>): data is IAgentEventDat
     return typeof data.eventName === 'string' && typeof data.commandId === 'string';
 }
 
-async function findBucketId(client: AWClient, eventType: string): Promise<string> {
+async function findBucketId(client: AWClient, eventType: string, bucketSuffix: string): Promise<string> {
     const buckets = await client.getBuckets();
     const bucketIds = Object.keys(buckets).sort();
     const preferredIds = bucketIds.filter((bucketId) =>
-        buckets[bucketId].type === eventType && bucketId.indexOf('aw-watcher-vscode_') === 0
+        buckets[bucketId].type === eventType && bucketId.indexOf(`${WATCHER_CLIENT_NAME}-${bucketSuffix}_`) === 0
     );
     if (preferredIds.length > 0) {
         return preferredIds[preferredIds.length - 1];
@@ -68,7 +69,7 @@ async function main() {
     const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
 
     const client = new AWClient('aw-watcher-vscode-report');
-    const bucketId = await findBucketId(client, 'app.editor.activity');
+    const bucketId = await findBucketId(client, BUCKET_EVENT_TYPE_AGENT_LIFECYCLE, 'agent');
     const events = await client.getEvents(bucketId, {
         start: start.toISOString(),
         end: end.toISOString()

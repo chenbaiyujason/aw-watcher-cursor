@@ -1,105 +1,94 @@
-/** Old tests
-//
-// Note: This example test is leveraging the Mocha test framework.
-// Please refer to their documentation on https://mochajs.org/ for help.
-//
-
-// The module 'assert' provides assertion methods from node
 import * as assert from 'assert';
-import Bucket from '../resources/bucket';
-import ProjectEvent from '../resources/coding.editor.project.event';
+import { resolveTimingConfig } from '../config';
+import {
+    buildContinuousIdentity,
+    createContinuousSignalState,
+    shouldSendContinuousHeartbeat,
+    updateContinuousSignalState
+} from '../timeline';
 
-// You can import and use all API from the 'vscode' module
-// as well as import your extension to test it
-// import * as vscode from 'vscode';
-// import * as myExtension from '../extension';
-
-// Defines a Mocha test suite to group tests of similar kind together
-describe('AW-Client Bucket', function () {
-    const bucket = new Bucket();
-
-    beforeEach(function initBucket (done) {
-        bucket.initBucket('aw-watcher-coding-test', 'mocha', 'coding.editor.project')
-            .then(() => done())
-            .catch(err => {
-                done(new Error(err));
-            });
+describe('timeline helpers', () => {
+    it('buildContinuousIdentity 应将字段串成稳定 merge key', () => {
+        const identity = buildContinuousIdentity(['proj', 'file.ts', 'typescript', 'main']);
+        assert.ok(identity.indexOf('proj') !== -1);
+        assert.ok(identity.indexOf('file.ts') !== -1);
+        assert.ok(identity.indexOf('main') !== -1);
     });
 
-    describe('bucket', () => {
-        it('[initBucket] should create aw-watcher-coding-test bucket without error', function (done) {
-            bucket.initBucket('aw-watcher-coding-test', 'test', 'coding.editor.project')
-                .then(() => done())
-                .catch(err => {
-                    done(new Error(err));
-                });
+    it('shouldSendContinuousHeartbeat 首次 heartbeat 应立即发送', () => {
+        const shouldSend = shouldSendContinuousHeartbeat({
+            nowMs: 1_000,
+            minIntervalMs: 2_000,
+            identity: 'proj\u001ffile.ts\u001fmain',
+            state: createContinuousSignalState()
         });
-        it('[getBucket] should retrieve bucket information for aw-watcher-coding-test', function (done) {
-            bucket.getBucket()
-                .then(({ data }) => {
-                    assert.equal('aw-watcher-coding-test_mocha', data.id);
-                    done();
-                })
-                .catch(err => done(new Error(err)));
-        });
-        it('[deleteBucket] should delete bucket without error', function (done) {
-            bucket.deleteBucket()
-                .then(() => bucket.getBucket())
-                .then(() => done(new Error('got bucket information after deletion')))
-                .catch(({ err, httpResponse, data }) => {
-                    assert.equal(httpResponse.statusCode, 404);
-                    done();
-                });
-        });
+        assert.strictEqual(shouldSend, true);
     });
 
-    describe('events', () => {
-        it('[sendEvent] should send event without errors', function (done) {
-            const event: ProjectEvent = {
-                timestamp: new Date().toISOString(),
-                duration: 0,
-                data: {
-                    editor: 'vs-code',
-                    project: 'aw-extension',
-                    language: 'ts'
-                }
-            };
-
-            bucket.sendEvent(undefined, event)
-                .then(({ httpResponse, data }) => {
-                    done();
-                })
-                .catch(({ err, httpResponse }) => {
-                    done(new Error(err));
-                });
+    it('shouldSendContinuousHeartbeat identity 不变且未过 interval 时应跳过', () => {
+        const nextState = updateContinuousSignalState(
+            createContinuousSignalState(),
+            1_000,
+            'proj\u001ffile.ts\u001fmain'
+        );
+        const shouldSend = shouldSendContinuousHeartbeat({
+            nowMs: 2_000,
+            minIntervalMs: 2_500,
+            identity: 'proj\u001ffile.ts\u001fmain',
+            state: nextState
         });
-        it('[getEvents] should get previously created event', function (done) {
-            bucket.getEvents()
-                .then(({ httpResponse, data }) => {
-                    done();
-                })
-                .catch(({ err, httpResponse }) => {
-                    done(new Error(err));
-                });
-        });
+        assert.strictEqual(shouldSend, false);
     });
 
-    describe('heartbeat', () => {
-        it('[sendHeartbeat] should send heartbeat without errors', function (done) {
-            const event: ProjectEvent = {
-                timestamp: new Date().toISOString(),
-                duration: 0,
-                data: {
-                    editor: 'vs-code',
-                    project: 'aw-extension',
-                    language: 'ts'
-                }
-            };
-
-            bucket.sendHearbeat(undefined, event, 10)
-                .then(() => done())
-                .catch(({ err }) => done(new Error(err)));
+    it('shouldSendContinuousHeartbeat identity 变化时应立即发送（捕获文件切换）', () => {
+        const nextState = updateContinuousSignalState(
+            createContinuousSignalState(),
+            1_000,
+            'proj\u001ffile-a.ts\u001fmain'
+        );
+        const shouldSend = shouldSendContinuousHeartbeat({
+            nowMs: 1_500,
+            minIntervalMs: 5_000,
+            identity: 'proj\u001ffile-b.ts\u001fmain',
+            state: nextState
         });
+        assert.strictEqual(shouldSend, true);
+    });
+
+    it('shouldSendContinuousHeartbeat 过了 interval 后相同 identity 也应发送', () => {
+        const nextState = updateContinuousSignalState(
+            createContinuousSignalState(),
+            1_000,
+            'proj\u001ffile.ts\u001fmain'
+        );
+        const shouldSend = shouldSendContinuousHeartbeat({
+            nowMs: 4_000,
+            minIntervalMs: 2_000,
+            identity: 'proj\u001ffile.ts\u001fmain',
+            state: nextState
+        });
+        assert.strictEqual(shouldSend, true);
     });
 });
-*/
+
+describe('resolveTimingConfig', () => {
+    it('legacy pulseTimeSec 应映射到 fileActivityPulseTimeSec', () => {
+        const config = resolveTimingConfig({ pulseTimeSec: 42 });
+        assert.strictEqual(config.fileActivityPulseTimeSec, 42);
+    });
+
+    it('显式 fileActivityPulseTimeSec 应覆盖 legacy pulseTimeSec', () => {
+        const config = resolveTimingConfig({
+            pulseTimeSec: 42,
+            fileActivityPulseTimeSec: 20
+        });
+        assert.strictEqual(config.fileActivityPulseTimeSec, 20);
+    });
+
+    it('默认配置应满足合理的兜底值', () => {
+        const config = resolveTimingConfig({});
+        assert.strictEqual(config.maxHeartbeatsPerSec, 0.5);
+        assert.strictEqual(config.fileActivityPulseTimeSec, 30);
+        assert.strictEqual(config.textChangeDebounceMs, 750);
+    });
+});

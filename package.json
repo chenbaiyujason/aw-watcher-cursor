@@ -2,7 +2,7 @@
     "name": "aw-watcher-cursor",
     "displayName": "aw-watcher-cursor",
     "description": "Editor watcher for ActivityWatch, the free and open-source automated time tracker.",
-    "version": "0.6.0",
+    "version": "0.7.0",
     "repository": {
         "type": "git",
         "url": "https://github.com/chenbaiyujason/aw-watcher-cursor"
@@ -52,7 +52,17 @@
                 "aw-watcher-vscode.pulseTimeSec": {
                     "type": "number",
                     "default": 30,
-                    "description": "Controls heartbeat merge window in seconds."
+                    "description": "Legacy alias for fileActivityPulseTimeSec（向后兼容）。"
+                },
+                "aw-watcher-vscode.fileActivityPulseTimeSec": {
+                    "type": "number",
+                    "default": 30,
+                    "description": "文件活动 heartbeat 的合并窗口（秒）。查看与编辑统一走此参数。"
+                },
+                "aw-watcher-vscode.textChangeDebounceMs": {
+                    "type": "number",
+                    "default": 750,
+                    "description": "Debounces immediate text-change driven heartbeat refreshes."
                 },
                 "aw-watcher-vscode.enableAgentReport": {
                     "type": "boolean",
@@ -118,15 +128,16 @@
         "vscode:prepublish": "npm run compile",
         "report:project": "npm run compile && node ./out/scripts/report-project.js",
         "report:agent": "npm run compile && node ./out/scripts/report-agent.js",
-        "report:commits": "npm run compile && node ./out/scripts/report-commits.js"
+        "report:commits": "npm run compile && node ./out/scripts/report-commits.js",
+        "push:test-timeline": "npm run compile && node ./out/scripts/push-test-timeline.js"
     },
     "devDependencies": {
         "@types/mocha": "^2.2.42",
-        "@types/node": "^7.10.11",
+        "@types/node": "^25.3.5",
         "@vscode/vsce": "^3.7.1",
         "mocha": "^8.2.1",
         "tslint": "^5.20.1",
-        "typescript": "^4.1.3",
+        "typescript": "^5.9.3",
         "vscode": "^1.1.37"
     },
     "dependencies": {

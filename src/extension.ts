@@ -2,6 +2,10 @@ import {
     Disposable,
     Extension,
     ExtensionContext,
+    TextDocument,
+    TextDocumentChangeEvent,
+    TextEditor,
+    WindowState,
     commands,
     extensions,
     window,
@@ -9,21 +13,33 @@ import {
 } from 'vscode';
 import { hostname } from 'os';
 import { execFile } from 'child_process';
-import { AWClient, IEvent } from '../aw-client-js/src/aw-client';
+import { AWClient, IEvent, IEventData } from '../aw-client-js/src/aw-client';
 import { API, GitExtension, Repository } from './git';
 import {
-    BUCKET_EVENT_TYPE_VSCODE,
+    BUCKET_DEFINITIONS,
     IAgentEventData,
     ICommonEventContext,
+    FileActivityKind,
+    IFileActivityEventData,
     createAgentEvent,
+    createBucketId,
     createCommitArchiveEvent,
-    createProjectEvent,
+    createFileActivityEvent,
     createSessionId
 } from './events';
+import {
+    IContinuousSignalState,
+    buildContinuousIdentity,
+    createContinuousSignalState,
+    shouldSendContinuousHeartbeat,
+    updateContinuousSignalState
+} from './timeline';
+import { resolveTimingConfig } from './config';
 
 interface IWatcherConfig {
     maxHeartbeatsPerSec: number;
-    pulseTimeSec: number;
+    fileActivityPulseTimeSec: number;
+    textChangeDebounceMs: number;
     enableAgentReport: boolean;
     enableCommitArchive: boolean;
     commitBackfillCount: number;
@@ -54,7 +70,10 @@ interface ICommandExecuteAPI {
     onDidExecuteCommand?: CommandExecuteHandler;
 }
 
-type EditorTriggerSource = 'selection' | 'active-editor' | 'save';
+type FocusTriggerSource = 'selection' | 'active-editor' | 'save' | 'window-focus' | 'window-blur' | 'ticker' | 'text-change';
+
+// 三类 bucket：文件活动（连续）、agent（离散）、commit（里程碑）。
+type BucketKind = 'fileActivity' | 'agentLifecycle' | 'gitCommit';
 
 interface IBucketInfo {
     id: string;
@@ -102,16 +121,20 @@ class ActivityWatchController {
     private _git: API | undefined;
     private _config: IWatcherConfig;
 
-    private _bucket: IBucketInfo;
-    private _bucketCreated: boolean = false;
+    // 三类 bucket 独立创建，连续事件与离散事件互不干扰。
+    private _buckets: Record<BucketKind, IBucketInfo>;
+    private _bucketCreated: Record<BucketKind, boolean>;
 
-    // 编辑器状态缓存，用于去重和限流。
-    private _lastFilePath: string = '';
-    private _lastBranch: string = '';
-    private _lastEditorHeartbeatTime: number = 0;
-    private _lastSelectionEventTime: number = 0;
-    private _editorSessionId: string = createSessionId('editor');
-    private _selectionDebounceMs: number = 2500;
+    // 单条文件活动时间线：查看与编辑统一在此 bucket 里连续合并。
+    private _fileActivityState: IContinuousSignalState = createContinuousSignalState();
+
+    // 焦点与节流控制。
+    private _windowFocused: boolean = true;
+    private _lastTextChangeSignalAtMs: number = 0;
+    private _lastEditingActivityAtMs: number = 0;
+    private _tickerHandle: ReturnType<typeof setInterval> | undefined;
+    private _tickerIntervalMs: number = 1000;
+    private _fileEditingIdleMs: number = 5000;
 
     // Agent 状态缓存，用于串联 session 与任务耗时。
     private _agentSessionId: string = createSessionId('agent');
@@ -126,27 +149,33 @@ class ActivityWatchController {
     constructor() {
         const clientName = 'aw-watcher-vscode';
         const hostName = hostname();
-        const bucketId = `${clientName}_${hostName}`;
-        this._bucket = {
-            id: bucketId,
-            hostName,
-            clientName,
-            eventType: BUCKET_EVENT_TYPE_VSCODE
+        this._buckets = {
+            fileActivity: this._createBucketInfo(clientName, hostName, 'fileActivity'),
+            agentLifecycle: this._createBucketInfo(clientName, hostName, 'agentLifecycle'),
+            gitCommit: this._createBucketInfo(clientName, hostName, 'gitCommit')
+        };
+        this._bucketCreated = {
+            fileActivity: false,
+            agentLifecycle: false,
+            gitCommit: false
         };
         this._client = new AWClient(clientName, { testing: false });
         this._config = this._loadConfigurations();
 
         const subscriptions: Disposable[] = [];
-        window.onDidChangeTextEditorSelection(() => this._onEditorEvent('selection'), this, subscriptions);
-        window.onDidChangeActiveTextEditor(() => this._onEditorEvent('active-editor'), this, subscriptions);
-        workspace.onDidSaveTextDocument(() => this._onEditorEvent('save'), this, subscriptions);
+        window.onDidChangeTextEditorSelection(() => this._onFocusSignal('selection'), this, subscriptions);
+        window.onDidChangeActiveTextEditor((editor) => this._onActiveEditorChanged(editor), this, subscriptions);
+        window.onDidChangeWindowState((state) => this._onWindowStateChanged(state), this, subscriptions);
+        workspace.onDidChangeTextDocument((event) => this._onTextDocumentChanged(event), this, subscriptions);
+        workspace.onDidSaveTextDocument((document) => this._onDocumentSaved(document), this, subscriptions);
         this._registerAgentCommandWatcher(subscriptions);
         this._disposable = Disposable.from(...subscriptions);
     }
 
     public init() {
         this._config = this._loadConfigurations();
-        this._ensureBucket(this._bucket, (created) => this._bucketCreated = created);
+        this._ensureAllBuckets();
+        this._startTicker();
         this._initGit()
             .then((res) => {
                 this._git = res;
@@ -159,6 +188,7 @@ class ActivityWatchController {
     }
 
     public dispose() {
+        this._stopTicker();
         this._disposeRepoSubscriptions();
         this._disposable.dispose();
     }
@@ -166,6 +196,17 @@ class ActivityWatchController {
     public showAgentCommandMapping() {
         const mappingText = JSON.stringify(this._config.commandMapping, undefined, 2);
         window.showInformationMessage(`ActivityWatch agent mapping: ${mappingText}`);
+    }
+
+    // 根据统一常量创建 bucket 描述，确保 watcher 与报表使用同一命名规则。
+    private _createBucketInfo(clientName: string, hostName: string, kind: BucketKind): IBucketInfo {
+        const definition = BUCKET_DEFINITIONS[kind];
+        return {
+            id: createBucketId(definition.suffix, hostName),
+            hostName,
+            clientName,
+            eventType: definition.eventType
+        };
     }
 
     private _ensureBucket(bucket: IBucketInfo, onUpdated: (created: boolean) => void) {
@@ -176,6 +217,17 @@ class ActivityWatchController {
                 onUpdated(false);
                 console.error(err);
             });
+    }
+
+    // 三类 bucket 各自创建，单个失败不影响其他轨道。
+    private _ensureAllBuckets() {
+        const bucketKinds: BucketKind[] = ['fileActivity', 'agentLifecycle', 'gitCommit'];
+        bucketKinds.forEach((bucketKind) => {
+            this._bucketCreated[bucketKind] = false;
+            this._ensureBucket(this._buckets[bucketKind], (created) => {
+                this._bucketCreated[bucketKind] = created;
+            });
+        });
     }
 
     private async _initGit(): Promise<API> {
@@ -189,8 +241,12 @@ class ActivityWatchController {
 
     private _loadConfigurations(): IWatcherConfig {
         const extConfigurations = workspace.getConfiguration('aw-watcher-vscode');
-        const maxHeartbeatsPerSec = extConfigurations.get<number>('maxHeartbeatsPerSec', 0.5);
-        const pulseTimeSec = extConfigurations.get<number>('pulseTimeSec', 30);
+        const timingConfig = resolveTimingConfig({
+            maxHeartbeatsPerSec: extConfigurations.get<number>('maxHeartbeatsPerSec'),
+            pulseTimeSec: extConfigurations.get<number>('pulseTimeSec'),
+            fileActivityPulseTimeSec: extConfigurations.get<number>('fileActivityPulseTimeSec'),
+            textChangeDebounceMs: extConfigurations.get<number>('textChangeDebounceMs')
+        });
         const enableAgentReport = extConfigurations.get<boolean>('enableAgentReport', true);
         const enableCommitArchive = extConfigurations.get<boolean>('enableCommitArchive', true);
         const commitBackfillCount = extConfigurations.get<number>('commitBackfillCount', 20);
@@ -198,8 +254,9 @@ class ActivityWatchController {
         const mappingVersion = extConfigurations.get<string>('mappingVersion', 'v1');
         const commandMapping = this._readCommandMapping(extConfigurations.get<unknown>('agentCommandMapping'));
         return {
-            maxHeartbeatsPerSec,
-            pulseTimeSec,
+            maxHeartbeatsPerSec: timingConfig.maxHeartbeatsPerSec,
+            fileActivityPulseTimeSec: timingConfig.fileActivityPulseTimeSec,
+            textChangeDebounceMs: timingConfig.textChangeDebounceMs,
             enableAgentReport,
             enableCommitArchive,
             commitBackfillCount,
@@ -241,42 +298,128 @@ class ActivityWatchController {
         commandApi.onDidExecuteCommand((event: ICommandExecutionEvent) => this._onCommandExecuted(event.command), this, subscriptions);
     }
 
-    private _onEditorEvent(trigger: EditorTriggerSource) {
-        if (!this._bucketCreated || !this._shouldTrackEditorEvent()) {
+    // 定时器保证"只是停留思考"也能持续刷新 heartbeat，让停留时段自然延展。
+    private _startTicker() {
+        this._stopTicker();
+        this._tickerHandle = setInterval(() => this._onTicker(), this._tickerIntervalMs);
+    }
+
+    private _stopTicker() {
+        if (this._tickerHandle) {
+            clearInterval(this._tickerHandle);
+            this._tickerHandle = undefined;
+        }
+    }
+
+    private _onTicker() {
+        this._emitContinuousSignals(Date.now(), 'ticker');
+    }
+
+    // 活动编辑器切换时立刻刷新，保证文件切换段落即时被记录。
+    private _onActiveEditorChanged(_editor: TextEditor | undefined) {
+        this._emitContinuousSignals(Date.now(), 'active-editor');
+    }
+
+    // selection 变化表示用户还在看文件，作为停留信号的辅助来源。
+    private _onFocusSignal(_trigger: FocusTriggerSource) {
+        this._emitContinuousSignals(Date.now(), 'selection');
+    }
+
+    // 文本变更走 debounce 控制刷新频率，避免极速打字产生无数碎片事件。
+    private _onTextDocumentChanged(event: TextDocumentChangeEvent) {
+        if (!this._isActiveFileDocument(event.document) || event.contentChanges.length === 0) {
             return;
         }
         const now = Date.now();
-        if (trigger === 'selection' && now - this._lastSelectionEventTime < this._selectionDebounceMs) {
+        this._lastEditingActivityAtMs = now;
+        if (now - this._lastTextChangeSignalAtMs < this._config.textChangeDebounceMs) {
             return;
         }
-        if (trigger === 'selection') {
-            this._lastSelectionEventTime = now;
+        this._lastTextChangeSignalAtMs = now;
+        this._emitContinuousSignals(now, 'text-change');
+    }
+
+    // 保存是编辑阶段的自然稳定点，触发一次 heartbeat 让 pulsetime 计算更准确。
+    private _onDocumentSaved(document: TextDocument) {
+        if (!this._isActiveFileDocument(document)) {
+            return;
+        }
+        const now = Date.now();
+        this._lastEditingActivityAtMs = now;
+        this._emitContinuousSignals(now, 'save');
+    }
+
+    // 窗口失焦前先打一次最后心跳，尽量把停留段落延展到切出时刻。
+    private _onWindowStateChanged(state: WindowState) {
+        if (!state.focused) {
+            this._emitContinuousSignals(Date.now(), 'window-blur');
+        }
+        this._windowFocused = state.focused;
+        if (state.focused) {
+            this._emitContinuousSignals(Date.now(), 'window-focus');
+        }
+    }
+
+    // 单条连续文件活动时间线：查看与编辑统一上报，无需区分模式。
+    private _emitContinuousSignals(nowMs: number, reason: FocusTriggerSource) {
+        if (!this._windowFocused || !this._shouldTrackEditorEvent()) {
+            return;
+        }
+        this._trackFileActivity(nowMs, reason);
+    }
+
+    // 文件活动 heartbeat：文件切换或活动类型变化时，identity 变化会自动在 AW 里形成新段落。
+    private _trackFileActivity(nowMs: number, reason: FocusTriggerSource) {
+        if (!this._bucketCreated.fileActivity) {
+            return;
         }
         const contextData = this._getCommonContext();
-        const curTime = now;
-        const heartbeatInterval = 1000 / this._config.maxHeartbeatsPerSec;
-        const shouldSend = contextData.file !== this._lastFilePath ||
-            contextData.branch !== this._lastBranch ||
-            this._lastEditorHeartbeatTime + heartbeatInterval < curTime;
+        const activityKind = this._resolveFileActivityKind(nowMs, reason);
+        const identity = buildContinuousIdentity([
+            contextData.project,
+            contextData.file,
+            contextData.language,
+            contextData.branch,
+            contextData.workspaceId,
+            activityKind
+        ]);
+        const shouldSend = shouldSendContinuousHeartbeat({
+            nowMs,
+            minIntervalMs: this._getMinHeartbeatIntervalMs(),
+            identity,
+            state: this._fileActivityState
+        });
         if (!shouldSend) {
             return;
         }
-        this._lastFilePath = contextData.file;
-        this._lastBranch = contextData.branch;
-        this._lastEditorHeartbeatTime = curTime;
-        const event = createProjectEvent({
+        const eventData: IFileActivityEventData = {
             project: contextData.project,
             file: contextData.file,
             language: contextData.language,
             branch: contextData.branch,
             workspaceId: contextData.workspaceId,
-            editorSessionId: this._editorSessionId
-        });
-        this._sendHeartbeat(this._bucket.id, event);
+            activityKind
+        };
+        const event = createFileActivityEvent(eventData);
+        this._fileActivityState = updateContinuousSignalState(this._fileActivityState, nowMs, identity);
+        this._sendHeartbeat('fileActivity', this._config.fileActivityPulseTimeSec, event);
+    }
+
+    // 通过“直接编辑触发 + 短暂编辑余温”推断当前文件活动类型，避免刚打字完就立刻退化成纯停留。
+    private _resolveFileActivityKind(nowMs: number, reason: FocusTriggerSource): FileActivityKind {
+        if (reason === 'text-change' || reason === 'save') {
+            return 'edit';
+        }
+        return nowMs - this._lastEditingActivityAtMs <= this._fileEditingIdleMs ? 'edit' : 'dwell';
+    }
+
+    private _getMinHeartbeatIntervalMs(): number {
+        const safeRate = this._config.maxHeartbeatsPerSec > 0 ? this._config.maxHeartbeatsPerSec : 0.5;
+        return Math.max(250, Math.floor(1000 / safeRate));
     }
 
     private _onCommandExecuted(commandId: string) {
-        if (!this._config.enableAgentReport || !this._bucketCreated) {
+        if (!this._config.enableAgentReport || !this._bucketCreated.agentLifecycle) {
             return;
         }
         const eventName = this._mapCommandToAgentEvent(commandId);
@@ -313,7 +456,7 @@ class ActivityWatchController {
             latencyMs
         };
         const event = createAgentEvent(eventData);
-        this._sendHeartbeat(this._bucket.id, event);
+        this._sendEvent('agentLifecycle', event);
     }
 
     private _mapCommandToAgentEvent(commandId: string): IAgentEventData['eventName'] | undefined {
@@ -338,7 +481,7 @@ class ActivityWatchController {
         return undefined;
     }
 
-    // 支持“等值 + 前缀 + 包含”三种匹配，兼容命令 ID 变体。
+    // 支持"等值 + 前缀通配 + 包含"三种匹配，兼容命令 ID 变体。
     private _matchCommand(commandId: string, patterns: string[]): boolean {
         return patterns.some((pattern) => {
             if (commandId === pattern) {
@@ -405,17 +548,19 @@ class ActivityWatchController {
         return lowerCommand.indexOf('cursor') !== -1 || lowerCommand.indexOf('anysphere') !== -1;
     }
 
-    private _sendHeartbeat(bucketId: string, event: IEvent) {
-        return this._client.heartbeat(bucketId, this._config.pulseTimeSec, event)
+    private _sendHeartbeat<TData extends IEventData>(bucketKind: BucketKind, pulseTimeSec: number, event: IEvent<TData>) {
+        const bucket = this._buckets[bucketKind];
+        return this._client.heartbeat(bucket.id, pulseTimeSec, event)
             .catch((err: Error) => {
                 console.error('sendHeartbeat error:', err);
                 this._handleError('Error while sending heartbeat', true);
             });
     }
 
-    // 非连续型事件（如 commit）使用 insertEvent，避免 heartbeat 合并影响可见性。
-    private _sendEvent(bucketId: string, event: IEvent) {
-        return this._client.insertEvent(bucketId, event)
+    // 非连续型事件（agent / commit）使用 insertEvent，保留独立段落不被合并。
+    private _sendEvent<TData extends IEventData>(bucketKind: BucketKind, event: IEvent<TData>) {
+        const bucket = this._buckets[bucketKind];
+        return this._client.insertEvent(bucket.id, event)
             .catch((err: Error) => {
                 console.error('sendEvent error:', err);
                 this._handleError('Error while sending event', true);
@@ -449,7 +594,7 @@ class ActivityWatchController {
     }
 
     private _onRepositoryStateChanged(repository: Repository) {
-        if (!this._config.enableCommitArchive || !this._bucketCreated) {
+        if (!this._config.enableCommitArchive || !this._bucketCreated.gitCommit) {
             return;
         }
         const repoPath = repository.rootUri.fsPath;
@@ -467,7 +612,7 @@ class ActivityWatchController {
 
     // 启动时回补最近提交，避免扩展未运行期间的漏采。
     private _runCommitBackfill() {
-        if (!this._config.enableCommitArchive || !this._bucketCreated || !this._git) {
+        if (!this._config.enableCommitArchive || !this._bucketCreated.gitCommit || !this._git) {
             return;
         }
         this._git.repositories.forEach((repository) => {
@@ -523,7 +668,7 @@ class ActivityWatchController {
                 body: details.body,
                 relatedAgentSessionId
             });
-            await this._sendEvent(this._bucket.id, summaryEvent);
+            await this._sendEvent('gitCommit', summaryEvent);
         } catch (err) {
             const error = err as Error;
             this._handleError(`Commit archive failed for ${commitHash}: ${error.message}`);
@@ -693,7 +838,15 @@ class ActivityWatchController {
         return repository.state.workingTreeChanges.length + repository.state.indexChanges.length;
     }
 
-    // 仅统计真实文件编辑器，避免 tasks/log/review 面板造成噪音和 unknown 项目。
+    private _isActiveFileDocument(document: TextDocument): boolean {
+        const editor = window.activeTextEditor;
+        if (!editor || editor.document.uri.scheme !== 'file') {
+            return false;
+        }
+        return editor.document.uri.toString() === document.uri.toString();
+    }
+
+    // 仅统计真实文件编辑器，避免 tasks/log/review 面板造成噪音。
     private _shouldTrackEditorEvent(): boolean {
         const editor = window.activeTextEditor;
         if (!editor) {
