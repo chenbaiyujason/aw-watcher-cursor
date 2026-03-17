@@ -34,28 +34,6 @@ export interface IFileActivityEventData {
     activityKind: FileActivityKind;
 }
 
-// Agent 任务类型，用于统计分布。
-export type AgentTaskKind = 'explain' | 'fix' | 'refactor' | 'test_gen' | 'ask' | 'unknown';
-
-// Agent 事件名称，覆盖基础生命周期。
-export type AgentEventName = 'panel_open' | 'task_start' | 'task_end' | 'patch_apply' | 'patch_reject' | 'agent_command';
-
-// Agent 事件数据。
-export interface IAgentEventData extends ICommonEventContext {
-    eventName: AgentEventName;
-    taskKind: AgentTaskKind;
-    source: 'shortcut' | 'command_palette' | 'context_menu' | 'unknown';
-    outcome: 'accepted' | 'rejected' | 'partial' | 'success' | 'failed' | 'unknown';
-    sessionId: string;
-    commandId: string;
-    mappingVersion: string;
-    selectedChars: number;
-    touchedFiles: number;
-    deltaAdded: number;
-    deltaDeleted: number;
-    latencyMs: number;
-}
-
 // Commit 归档事件数据，保持轻量，具体文件变更由 hash 再查 git。
 export interface ICommitArchiveEventData extends ICommonEventContext {
     eventName: 'commit_summary';
@@ -68,7 +46,6 @@ export interface ICommitArchiveEventData extends ICommonEventContext {
     commitDate: string;
     subject: string;
     body: string;
-    relatedAgentSessionId: string;
 }
 
 // bucket 定义帮助扩展与报表共用统一常量。
@@ -80,16 +57,11 @@ export interface IBucketDefinition {
 // 三类 bucket：文件活动（连续）、agent（离散）、commit（离散里程碑）。
 export const BUCKET_DEFINITIONS: {
     fileActivity: IBucketDefinition;
-    agentLifecycle: IBucketDefinition;
     gitCommit: IBucketDefinition;
 } = {
     fileActivity: {
         suffix: BUCKET_SUFFIX_FILE_ACTIVITY,
         eventType: BUCKET_EVENT_TYPE_FILE_ACTIVITY
-    },
-    agentLifecycle: {
-        suffix: BUCKET_SUFFIX_AGENT,
-        eventType: BUCKET_EVENT_TYPE_AGENT_LIFECYCLE
     },
     gitCommit: {
         suffix: BUCKET_SUFFIX_COMMIT,
@@ -98,16 +70,7 @@ export const BUCKET_DEFINITIONS: {
 };
 
 // 统一构造文件活动事件，查看和编辑共用同一 builder。
-export function createFileActivityEvent(data: IFileActivityEventData): IEvent<IFileActivityEventData> {
-    return {
-        timestamp: new Date(),
-        duration: 0,
-        data
-    };
-}
-
-// 统一构造 Agent 事件，避免散落拼字段。
-export function createAgentEvent(data: IAgentEventData): IEvent<IAgentEventData> {
+export function createFileActivityEvent(data: IFileActivityEventData): IEvent {
     return {
         timestamp: new Date(),
         duration: 0,
@@ -116,7 +79,7 @@ export function createAgentEvent(data: IAgentEventData): IEvent<IAgentEventData>
 }
 
 // Commit 作为里程碑事件，默认 60 秒让时间线上更显眼。
-export function createCommitArchiveEvent(data: ICommitArchiveEventData): IEvent<ICommitArchiveEventData> {
+export function createCommitArchiveEvent(data: ICommitArchiveEventData): IEvent {
     return {
         timestamp: new Date(),
         duration: 60,
@@ -127,11 +90,4 @@ export function createCommitArchiveEvent(data: ICommitArchiveEventData): IEvent<
 // 统一生成 bucketId，确保 watcher 与报表脚本使用同一命名规则。
 export function createBucketId(bucketSuffix: string, hostName: string): string {
     return `${WATCHER_CLIENT_NAME}-${bucketSuffix}_${hostName}`;
-}
-
-// 生成会话 ID，便于上层按会话聚合。
-export function createSessionId(prefix: string): string {
-    const timePart = Date.now().toString(36);
-    const randomPart = Math.random().toString(36).slice(2, 8);
-    return `${prefix}_${timePart}_${randomPart}`;
 }

@@ -1,4 +1,8 @@
 # Change Log
+### 1.0.0
+
+Added the bottom-right ActivityWatch connection status item, bundled Cursor Hooks auto-installation, and refreshed the packaged extension release.
+
 ### 0.1.0
 
 Initial release of aw-watcher-vscode.

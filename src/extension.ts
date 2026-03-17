@@ -2,9 +2,12 @@ import {
     Disposable,
     Extension,
     ExtensionContext,
+    StatusBarAlignment,
+    StatusBarItem,
     TextDocument,
     TextDocumentChangeEvent,
     TextEditor,
+    ThemeColor,
     WindowState,
     commands,
     extensions,
@@ -13,19 +16,17 @@ import {
 } from 'vscode';
 import { hostname } from 'os';
 import { execFile } from 'child_process';
-import { AWClient, IEvent, IEventData } from '../aw-client-js/src/aw-client';
+import { AWClient, IEvent } from '../aw-client-js/src/aw-client';
 import { API, GitExtension, Repository } from './git';
+import { installBundledCursorHooks } from './cursor-hooks';
 import {
     BUCKET_DEFINITIONS,
-    IAgentEventData,
     ICommonEventContext,
     FileActivityKind,
     IFileActivityEventData,
-    createAgentEvent,
     createBucketId,
     createCommitArchiveEvent,
-    createFileActivityEvent,
-    createSessionId
+    createFileActivityEvent
 } from './events';
 import {
     IContinuousSignalState,
@@ -35,45 +36,25 @@ import {
     updateContinuousSignalState
 } from './timeline';
 import { resolveTimingConfig } from './config';
+import {
+    ActivityWatchConnectionState,
+    buildConnectionStatusPresentation,
+    formatTimestamp
+} from './connection-status';
 
 interface IWatcherConfig {
     maxHeartbeatsPerSec: number;
     fileActivityPulseTimeSec: number;
     textChangeDebounceMs: number;
-    enableAgentReport: boolean;
     enableCommitArchive: boolean;
     commitBackfillCount: number;
     includeAuthorPII: boolean;
-    mappingVersion: string;
-    commandMapping: IAgentCommandMapping;
-}
-
-interface IAgentCommandMapping {
-    panelOpen: string[];
-    taskStart: string[];
-    taskEnd: string[];
-    patchApply: string[];
-    patchReject: string[];
-}
-
-interface ICommandExecutionEvent {
-    command: string;
-}
-
-type CommandExecuteHandler = (
-    listener: (event: ICommandExecutionEvent) => void,
-    thisArgs?: unknown,
-    disposables?: Disposable[]
-) => Disposable;
-
-interface ICommandExecuteAPI {
-    onDidExecuteCommand?: CommandExecuteHandler;
 }
 
 type FocusTriggerSource = 'selection' | 'active-editor' | 'save' | 'window-focus' | 'window-blur' | 'ticker' | 'text-change';
 
-// 三类 bucket：文件活动（连续）、agent（离散）、commit（里程碑）。
-type BucketKind = 'fileActivity' | 'agentLifecycle' | 'gitCommit';
+// 两类 bucket：文件活动（连续）与 commit（里程碑）。
+type BucketKind = 'fileActivity' | 'gitCommit';
 
 interface IBucketInfo {
     id: string;
@@ -92,27 +73,17 @@ interface ICommitDetails {
     subject: string;
     body: string;
 }
-
-const DEFAULT_COMMAND_MAPPING: IAgentCommandMapping = {
-    panelOpen: ['cursor.agent.open', 'cursor.chat.open'],
-    taskStart: ['cursor.agent.run', 'cursor.chat.send', 'cursor.agent.ask'],
-    taskEnd: ['cursor.agent.stop', 'cursor.chat.stop'],
-    patchApply: ['cursor.agent.apply', 'cursor.chat.apply'],
-    patchReject: ['cursor.agent.reject', 'cursor.chat.reject']
-};
-
 export function activate(context: ExtensionContext) {
     console.log('ActivityWatch extension activated.');
+    // 扩展激活后立即尝试同步全局 Cursor Hooks，确保新增 hook 能自动生效。
+    void installBundledCursorHooks(context);
     const controller = new ActivityWatchController();
-    controller.init();
-    context.subscriptions.push(controller);
-
-    // 保留原有刷新命令，重建配置和 bucket 连接。
+    // 先注册命令，再启动初始化，避免初始化阶段异常时命令不可用。
     const reloadCommand = commands.registerCommand('extension.reload', () => controller.init());
-    context.subscriptions.push(reloadCommand);
-    // 提供查看当前映射的命令，便于排查 Cursor 命令匹配。
-    const showMappingCommand = commands.registerCommand('extension.showAgentCommandMapping', () => controller.showAgentCommandMapping());
-    context.subscriptions.push(showMappingCommand);
+    const showStatusCommand = commands.registerCommand('aw-watcher-vscode.showConnectionStatus', () => controller.showConnectionStatus());
+    const reconnectCommand = commands.registerCommand('aw-watcher-vscode.reconnect', () => controller.reconnect());
+    context.subscriptions.push(controller, reloadCommand, showStatusCommand, reconnectCommand);
+    controller.init();
 }
 
 class ActivityWatchController {
@@ -121,7 +92,7 @@ class ActivityWatchController {
     private _git: API | undefined;
     private _config: IWatcherConfig;
 
-    // 三类 bucket 独立创建，连续事件与离散事件互不干扰。
+    // 两类 bucket 独立创建，连续事件与离散事件互不干扰。
     private _buckets: Record<BucketKind, IBucketInfo>;
     private _bucketCreated: Record<BucketKind, boolean>;
 
@@ -135,11 +106,14 @@ class ActivityWatchController {
     private _tickerHandle: ReturnType<typeof setInterval> | undefined;
     private _tickerIntervalMs: number = 1000;
     private _fileEditingIdleMs: number = 5000;
-
-    // Agent 状态缓存，用于串联 session 与任务耗时。
-    private _agentSessionId: string = createSessionId('agent');
-    private _agentTaskStartTimeMs: number = 0;
-    private _lastAgentEventAtMs: number = 0;
+    // 连接状态由状态栏展示，方便直接判断当前是否还能向 AW 推送。
+    private _statusBarItem: StatusBarItem;
+    private _connectionState: ActivityWatchConnectionState = 'connecting';
+    private _lastSuccessfulContactAtMs: number = 0;
+    private _lastConnectionErrorMessage: string = '';
+    private _connectionHealthHandle: ReturnType<typeof setInterval> | undefined;
+    private _connectionHealthIntervalMs: number = 15000;
+    private _connectionCheckInFlight: boolean = false;
 
     // Commit 归档状态缓存，用于去重和变更检测。
     private _repoSubscriptions: Disposable[] = [];
@@ -151,16 +125,18 @@ class ActivityWatchController {
         const hostName = hostname();
         this._buckets = {
             fileActivity: this._createBucketInfo(clientName, hostName, 'fileActivity'),
-            agentLifecycle: this._createBucketInfo(clientName, hostName, 'agentLifecycle'),
             gitCommit: this._createBucketInfo(clientName, hostName, 'gitCommit')
         };
         this._bucketCreated = {
             fileActivity: false,
-            agentLifecycle: false,
             gitCommit: false
         };
         this._client = new AWClient(clientName, { testing: false });
         this._config = this._loadConfigurations();
+        this._statusBarItem = window.createStatusBarItem(StatusBarAlignment.Right, 100);
+        this._statusBarItem.command = 'aw-watcher-vscode.showConnectionStatus';
+        this._statusBarItem.show();
+        this._refreshStatusBar();
 
         const subscriptions: Disposable[] = [];
         window.onDidChangeTextEditorSelection(() => this._onFocusSignal('selection'), this, subscriptions);
@@ -168,14 +144,14 @@ class ActivityWatchController {
         window.onDidChangeWindowState((state) => this._onWindowStateChanged(state), this, subscriptions);
         workspace.onDidChangeTextDocument((event) => this._onTextDocumentChanged(event), this, subscriptions);
         workspace.onDidSaveTextDocument((document) => this._onDocumentSaved(document), this, subscriptions);
-        this._registerAgentCommandWatcher(subscriptions);
-        this._disposable = Disposable.from(...subscriptions);
+        this._disposable = Disposable.from(...subscriptions, this._statusBarItem);
     }
 
     public init() {
         this._config = this._loadConfigurations();
-        this._ensureAllBuckets();
         this._startTicker();
+        this._startConnectionHealthCheck();
+        void this._refreshConnectionStatus('startup', true);
         this._initGit()
             .then((res) => {
                 this._git = res;
@@ -189,13 +165,30 @@ class ActivityWatchController {
 
     public dispose() {
         this._stopTicker();
+        this._stopConnectionHealthCheck();
         this._disposeRepoSubscriptions();
         this._disposable.dispose();
     }
 
-    public showAgentCommandMapping() {
-        const mappingText = JSON.stringify(this._config.commandMapping, undefined, 2);
-        window.showInformationMessage(`ActivityWatch agent mapping: ${mappingText}`);
+    // 状态栏点击后展示当前连接状态，并允许直接触发重连。
+    public async showConnectionStatus(): Promise<void> {
+        const reconnectAction = '立即重连';
+        const message = [
+            `ActivityWatch 当前状态：${this._getConnectionStateLabel()}`,
+            `最近成功通信：${formatTimestamp(this._lastSuccessfulContactAtMs)}`,
+            `最近错误：${this._lastConnectionErrorMessage ? this._lastConnectionErrorMessage : '无'}`
+        ].join(' | ');
+        const action = this._connectionState === 'disconnected'
+            ? await window.showWarningMessage(message, reconnectAction)
+            : await window.showInformationMessage(message, reconnectAction);
+        if (action === reconnectAction) {
+            await this.reconnect();
+        }
+    }
+
+    // 手动重连会重新探测服务并重建 bucket。
+    public async reconnect(): Promise<void> {
+        await this._refreshConnectionStatus('manual-reconnect', true);
     }
 
     // 根据统一常量创建 bucket 描述，确保 watcher 与报表使用同一命名规则。
@@ -209,25 +202,27 @@ class ActivityWatchController {
         };
     }
 
-    private _ensureBucket(bucket: IBucketInfo, onUpdated: (created: boolean) => void) {
-        this._client.ensureBucket(bucket.id, bucket.eventType, bucket.hostName)
-            .then(() => onUpdated(true))
-            .catch((err: Error) => {
-                this._handleError(`Couldn't create bucket ${bucket.eventType}.`, true);
-                onUpdated(false);
-                console.error(err);
-            });
+    private async _ensureBucket(bucket: IBucketInfo): Promise<boolean> {
+        try {
+            await this._client.ensureBucket(bucket.id, bucket.eventType, bucket.hostName);
+            return true;
+        } catch (err) {
+            const error = this._asError(err);
+            this._handleError(`Couldn't create bucket ${bucket.eventType}: ${error.message}`, true);
+            console.error(err);
+            return false;
+        }
     }
 
-    // 三类 bucket 各自创建，单个失败不影响其他轨道。
-    private _ensureAllBuckets() {
-        const bucketKinds: BucketKind[] = ['fileActivity', 'agentLifecycle', 'gitCommit'];
-        bucketKinds.forEach((bucketKind) => {
-            this._bucketCreated[bucketKind] = false;
-            this._ensureBucket(this._buckets[bucketKind], (created) => {
-                this._bucketCreated[bucketKind] = created;
-            });
-        });
+    // 两类 bucket 各自创建，单个失败不影响其他轨道。
+    private async _ensureAllBuckets(): Promise<boolean> {
+        const bucketKinds: BucketKind[] = ['fileActivity', 'gitCommit'];
+        const results = await Promise.all(bucketKinds.map(async (bucketKind) => {
+            const created = await this._ensureBucket(this._buckets[bucketKind]);
+            this._bucketCreated[bucketKind] = created;
+            return created;
+        }));
+        return results.every((created) => created);
     }
 
     private async _initGit(): Promise<API> {
@@ -247,55 +242,17 @@ class ActivityWatchController {
             fileActivityPulseTimeSec: extConfigurations.get<number>('fileActivityPulseTimeSec'),
             textChangeDebounceMs: extConfigurations.get<number>('textChangeDebounceMs')
         });
-        const enableAgentReport = extConfigurations.get<boolean>('enableAgentReport', true);
         const enableCommitArchive = extConfigurations.get<boolean>('enableCommitArchive', true);
         const commitBackfillCount = extConfigurations.get<number>('commitBackfillCount', 20);
         const includeAuthorPII = extConfigurations.get<boolean>('includeAuthorPII', false);
-        const mappingVersion = extConfigurations.get<string>('mappingVersion', 'v1');
-        const commandMapping = this._readCommandMapping(extConfigurations.get<unknown>('agentCommandMapping'));
         return {
             maxHeartbeatsPerSec: timingConfig.maxHeartbeatsPerSec,
             fileActivityPulseTimeSec: timingConfig.fileActivityPulseTimeSec,
             textChangeDebounceMs: timingConfig.textChangeDebounceMs,
-            enableAgentReport,
             enableCommitArchive,
             commitBackfillCount,
-            includeAuthorPII,
-            mappingVersion,
-            commandMapping
+            includeAuthorPII
         };
-    }
-
-    private _readCommandMapping(rawValue: unknown): IAgentCommandMapping {
-        if (!rawValue || typeof rawValue !== 'object') {
-            return DEFAULT_COMMAND_MAPPING;
-        }
-        const candidate = rawValue as { [key: string]: unknown };
-        const readList = (key: keyof IAgentCommandMapping): string[] => {
-            const value = candidate[key];
-            if (!Array.isArray(value)) {
-                return DEFAULT_COMMAND_MAPPING[key];
-            }
-            const normalized = value.filter((item) => typeof item === 'string').map((item) => item as string);
-            return normalized.length ? normalized : DEFAULT_COMMAND_MAPPING[key];
-        };
-        return {
-            panelOpen: readList('panelOpen'),
-            taskStart: readList('taskStart'),
-            taskEnd: readList('taskEnd'),
-            patchApply: readList('patchApply'),
-            patchReject: readList('patchReject')
-        };
-    }
-
-    // 注册命令执行监听，识别 Cursor Agent 事件。
-    private _registerAgentCommandWatcher(subscriptions: Disposable[]) {
-        const commandApi = commands as ICommandExecuteAPI;
-        if (!commandApi.onDidExecuteCommand) {
-            console.warn('[ActivityWatch] onDidExecuteCommand not available in current VS Code API.');
-            return;
-        }
-        commandApi.onDidExecuteCommand((event: ICommandExecutionEvent) => this._onCommandExecuted(event.command), this, subscriptions);
     }
 
     // 定时器保证"只是停留思考"也能持续刷新 heartbeat，让停留时段自然延展。
@@ -308,6 +265,21 @@ class ActivityWatchController {
         if (this._tickerHandle) {
             clearInterval(this._tickerHandle);
             this._tickerHandle = undefined;
+        }
+    }
+
+    // 周期性探测 AW 服务，避免 server 重启后扩展停在失效连接上。
+    private _startConnectionHealthCheck() {
+        this._stopConnectionHealthCheck();
+        this._connectionHealthHandle = setInterval(() => {
+            void this._refreshConnectionStatus('interval-health-check', this._hasMissingBuckets());
+        }, this._connectionHealthIntervalMs);
+    }
+
+    private _stopConnectionHealthCheck() {
+        if (this._connectionHealthHandle) {
+            clearInterval(this._connectionHealthHandle);
+            this._connectionHealthHandle = undefined;
         }
     }
 
@@ -371,6 +343,7 @@ class ActivityWatchController {
     // 文件活动 heartbeat：文件切换或活动类型变化时，identity 变化会自动在 AW 里形成新段落。
     private _trackFileActivity(nowMs: number, reason: FocusTriggerSource) {
         if (!this._bucketCreated.fileActivity) {
+            void this._refreshConnectionStatus('file-activity-missing-bucket', true);
             return;
         }
         const contextData = this._getCommonContext();
@@ -418,152 +391,33 @@ class ActivityWatchController {
         return Math.max(250, Math.floor(1000 / safeRate));
     }
 
-    private _onCommandExecuted(commandId: string) {
-        if (!this._config.enableAgentReport || !this._bucketCreated.agentLifecycle) {
-            return;
+    private _sendHeartbeat(bucketKind: BucketKind, pulseTimeSec: number, event: IEvent): Promise<void> {
+        if (!this._bucketCreated[bucketKind]) {
+            void this._refreshConnectionStatus(`${bucketKind}-heartbeat-skipped`, true);
+            return Promise.resolve();
         }
-        const eventName = this._mapCommandToAgentEvent(commandId);
-        if (!eventName) {
-            return;
-        }
-        const nowMs = Date.now();
-        this._lastAgentEventAtMs = nowMs;
-        if (eventName === 'panel_open') {
-            this._agentSessionId = createSessionId('agent');
-        }
-        if (eventName === 'task_start') {
-            this._agentTaskStartTimeMs = nowMs;
-        }
-        const latencyMs = this._agentTaskStartTimeMs > 0 ? nowMs - this._agentTaskStartTimeMs : 0;
-        const contextData = this._getCommonContext();
-        const eventData: IAgentEventData = {
-            project: contextData.project,
-            file: contextData.file,
-            language: contextData.language,
-            branch: contextData.branch,
-            workspaceId: contextData.workspaceId,
-            eventName,
-            taskKind: this._inferTaskKind(commandId),
-            source: this._inferCommandSource(commandId),
-            outcome: this._mapOutcome(eventName),
-            sessionId: this._agentSessionId,
-            commandId,
-            mappingVersion: this._config.mappingVersion,
-            selectedChars: this._getSelectionCharCount(),
-            touchedFiles: this._getTouchedFilesCount(),
-            deltaAdded: 0,
-            deltaDeleted: 0,
-            latencyMs
-        };
-        const event = createAgentEvent(eventData);
-        this._sendEvent('agentLifecycle', event);
-    }
-
-    private _mapCommandToAgentEvent(commandId: string): IAgentEventData['eventName'] | undefined {
-        if (this._matchCommand(commandId, this._config.commandMapping.panelOpen)) {
-            return 'panel_open';
-        }
-        if (this._matchCommand(commandId, this._config.commandMapping.taskStart)) {
-            return 'task_start';
-        }
-        if (this._matchCommand(commandId, this._config.commandMapping.taskEnd)) {
-            return 'task_end';
-        }
-        if (this._matchCommand(commandId, this._config.commandMapping.patchApply)) {
-            return 'patch_apply';
-        }
-        if (this._matchCommand(commandId, this._config.commandMapping.patchReject)) {
-            return 'patch_reject';
-        }
-        if (this._isCursorAgentCommand(commandId)) {
-            return 'agent_command';
-        }
-        return undefined;
-    }
-
-    // 支持"等值 + 前缀通配 + 包含"三种匹配，兼容命令 ID 变体。
-    private _matchCommand(commandId: string, patterns: string[]): boolean {
-        return patterns.some((pattern) => {
-            if (commandId === pattern) {
-                return true;
-            }
-            if (pattern.endsWith('.*')) {
-                const prefix = pattern.slice(0, pattern.length - 1);
-                return commandId.startsWith(prefix);
-            }
-            return commandId.indexOf(pattern) !== -1;
-        });
-    }
-
-    private _inferTaskKind(commandId: string): IAgentEventData['taskKind'] {
-        const lowerCommand = commandId.toLowerCase();
-        if (lowerCommand.indexOf('explain') !== -1) {
-            return 'explain';
-        }
-        if (lowerCommand.indexOf('fix') !== -1) {
-            return 'fix';
-        }
-        if (lowerCommand.indexOf('refactor') !== -1) {
-            return 'refactor';
-        }
-        if (lowerCommand.indexOf('test') !== -1) {
-            return 'test_gen';
-        }
-        if (lowerCommand.indexOf('ask') !== -1 || lowerCommand.indexOf('chat') !== -1) {
-            return 'ask';
-        }
-        return 'unknown';
-    }
-
-    private _inferCommandSource(commandId: string): IAgentEventData['source'] {
-        const lowerCommand = commandId.toLowerCase();
-        if (lowerCommand.indexOf('palette') !== -1) {
-            return 'command_palette';
-        }
-        if (lowerCommand.indexOf('context') !== -1) {
-            return 'context_menu';
-        }
-        if (lowerCommand.indexOf('key') !== -1 || lowerCommand.indexOf('shortcut') !== -1) {
-            return 'shortcut';
-        }
-        return 'unknown';
-    }
-
-    private _mapOutcome(eventName: IAgentEventData['eventName']): IAgentEventData['outcome'] {
-        if (eventName === 'patch_apply') {
-            return 'accepted';
-        }
-        if (eventName === 'patch_reject') {
-            return 'rejected';
-        }
-        if (eventName === 'task_end') {
-            return 'success';
-        }
-        return 'unknown';
-    }
-
-    // 对 Cursor 命令做兜底捕获，避免映射遗漏导致漏记。
-    private _isCursorAgentCommand(commandId: string): boolean {
-        const lowerCommand = commandId.toLowerCase();
-        return lowerCommand.indexOf('cursor') !== -1 || lowerCommand.indexOf('anysphere') !== -1;
-    }
-
-    private _sendHeartbeat<TData extends IEventData>(bucketKind: BucketKind, pulseTimeSec: number, event: IEvent<TData>) {
         const bucket = this._buckets[bucketKind];
         return this._client.heartbeat(bucket.id, pulseTimeSec, event)
             .catch((err: Error) => {
                 console.error('sendHeartbeat error:', err);
-                this._handleError('Error while sending heartbeat', true);
+                this._markDisconnected(`Heartbeat failed: ${err.message}`, true);
+                void this._refreshConnectionStatus('heartbeat-send-failed', true);
             });
     }
 
-    // 非连续型事件（agent / commit）使用 insertEvent，保留独立段落不被合并。
-    private _sendEvent<TData extends IEventData>(bucketKind: BucketKind, event: IEvent<TData>) {
+    // 非连续型事件（commit）使用 insertEvent，保留独立段落不被合并。
+    private _sendEvent(bucketKind: BucketKind, event: IEvent): Promise<IEvent | undefined> {
+        if (!this._bucketCreated[bucketKind]) {
+            void this._refreshConnectionStatus(`${bucketKind}-event-skipped`, true);
+            return Promise.resolve(undefined);
+        }
         const bucket = this._buckets[bucketKind];
         return this._client.insertEvent(bucket.id, event)
             .catch((err: Error) => {
                 console.error('sendEvent error:', err);
-                this._handleError('Error while sending event', true);
+                this._markDisconnected(`Event send failed: ${err.message}`, true);
+                void this._refreshConnectionStatus('event-send-failed', true);
+                return undefined;
             });
     }
 
@@ -594,7 +448,11 @@ class ActivityWatchController {
     }
 
     private _onRepositoryStateChanged(repository: Repository) {
-        if (!this._config.enableCommitArchive || !this._bucketCreated.gitCommit) {
+        if (!this._config.enableCommitArchive) {
+            return;
+        }
+        if (!this._bucketCreated.gitCommit) {
+            void this._refreshConnectionStatus('commit-missing-bucket', true);
             return;
         }
         const repoPath = repository.rootUri.fsPath;
@@ -612,7 +470,11 @@ class ActivityWatchController {
 
     // 启动时回补最近提交，避免扩展未运行期间的漏采。
     private _runCommitBackfill() {
-        if (!this._config.enableCommitArchive || !this._bucketCreated.gitCommit || !this._git) {
+        if (!this._config.enableCommitArchive || !this._git) {
+            return;
+        }
+        if (!this._bucketCreated.gitCommit) {
+            void this._refreshConnectionStatus('commit-backfill-missing-bucket', true);
             return;
         }
         this._git.repositories.forEach((repository) => {
@@ -649,7 +511,6 @@ class ActivityWatchController {
             const details = await this._readCommitDetails(repository, commitHash);
             this._archivedCommitHashes[commitHash] = true;
             const context = this._buildCommitContext(repository);
-            const relatedAgentSessionId = this._getRelatedAgentSessionId();
             const summaryEvent = createCommitArchiveEvent({
                 eventName: 'commit_summary',
                 commitHashFull: details.commitHashFull,
@@ -665,8 +526,7 @@ class ActivityWatchController {
                 authorDate: details.authorDate,
                 commitDate: details.commitDate,
                 subject: details.subject,
-                body: details.body,
-                relatedAgentSessionId
+                body: details.body
             });
             await this._sendEvent('gitCommit', summaryEvent);
         } catch (err) {
@@ -729,12 +589,6 @@ class ActivityWatchController {
                 }
             );
         });
-    }
-
-    private _getRelatedAgentSessionId(): string {
-        const nowMs = Date.now();
-        const tenMinutesMs = 10 * 60 * 1000;
-        return nowMs - this._lastAgentEventAtMs <= tenMinutesMs ? this._agentSessionId : 'unknown';
     }
 
     private _disposeRepoSubscriptions() {
@@ -815,29 +669,6 @@ class ActivityWatchController {
         return this._git.repositories[0];
     }
 
-    private _getSelectionCharCount(): number {
-        const editor = window.activeTextEditor;
-        if (!editor || editor.selections.length === 0) {
-            return 0;
-        }
-        let total = 0;
-        editor.selections.forEach((selection) => {
-            total += Math.abs(selection.end.character - selection.start.character);
-        });
-        return total;
-    }
-
-    private _getTouchedFilesCount(): number {
-        if (!this._git) {
-            return 0;
-        }
-        const repository = this._getActiveRepository();
-        if (!repository) {
-            return 0;
-        }
-        return repository.state.workingTreeChanges.length + repository.state.indexChanges.length;
-    }
-
     private _isActiveFileDocument(document: TextDocument): boolean {
         const editor = window.activeTextEditor;
         if (!editor || editor.document.uri.scheme !== 'file') {
@@ -853,6 +684,124 @@ class ActivityWatchController {
             return false;
         }
         return editor.document.uri.scheme === 'file';
+    }
+
+    // 统一执行服务探测与 bucket 重建，让断联后的 watcher 能自动恢复。
+    private async _refreshConnectionStatus(reason: string, forceBucketEnsure: boolean): Promise<boolean> {
+        if (this._connectionCheckInFlight) {
+            return false;
+        }
+        this._connectionCheckInFlight = true;
+        console.log(`[ActivityWatch] connection check start: reason=${reason}, forceBucketEnsure=${forceBucketEnsure}`);
+        if (reason === 'startup' || reason === 'manual-reconnect') {
+            this._setConnectionState('connecting');
+        }
+        try {
+            await this._client.getInfo();
+            console.log('[ActivityWatch] getInfo ok');
+            this._markConnected();
+            if (forceBucketEnsure || this._hasMissingBuckets()) {
+                const bucketReady = await this._ensureAllBuckets();
+                if (!bucketReady) {
+                    console.warn(`[ActivityWatch] bucket ensure failed: reason=${reason}`);
+                    this._markDisconnected(`Bucket 初始化失败（${reason}）`, false);
+                    return false;
+                }
+            }
+            console.log(`[ActivityWatch] connection ready: reason=${reason}`);
+            this._markConnected();
+            return true;
+        } catch (err) {
+            const error = this._asError(err);
+            console.error(`[ActivityWatch] connection check failed: reason=${reason}`, error);
+            this._markDisconnected(`AW 服务不可达（${reason}）：${error.message}`, false);
+            return false;
+        } finally {
+            this._connectionCheckInFlight = false;
+        }
+    }
+
+    private _hasMissingBuckets(): boolean {
+        const bucketKinds: BucketKind[] = ['fileActivity', 'gitCommit'];
+        return bucketKinds.some((bucketKind) => !this._bucketCreated[bucketKind]);
+    }
+
+    // 根据内部状态统一刷新状态栏展示与可访问标签。
+    private _refreshStatusBar() {
+        const presentation = buildConnectionStatusPresentation({
+            state: this._connectionState,
+            lastSuccessfulContactAtMs: this._lastSuccessfulContactAtMs,
+            lastErrorMessage: this._lastConnectionErrorMessage
+        });
+        this._statusBarItem.text = presentation.text;
+        this._statusBarItem.tooltip = presentation.tooltip;
+        if (this._connectionState === 'disconnected') {
+            this._statusBarItem.color = new ThemeColor('statusBarItem.errorForeground');
+            return;
+        }
+        if (this._connectionState === 'connecting') {
+            this._statusBarItem.color = new ThemeColor('statusBarItem.warningForeground');
+            return;
+        }
+        this._statusBarItem.color = undefined;
+    }
+
+    private _setConnectionState(state: ActivityWatchConnectionState, lastErrorMessage?: string) {
+        const previousState = this._connectionState;
+        this._connectionState = state;
+        if (typeof lastErrorMessage === 'string') {
+            this._lastConnectionErrorMessage = lastErrorMessage;
+        }
+        if (state === 'connected') {
+            this._lastSuccessfulContactAtMs = Date.now();
+            this._lastConnectionErrorMessage = '';
+        }
+        this._refreshStatusBar();
+        if (previousState === state) {
+            return;
+        }
+        if (state === 'disconnected') {
+            window.showWarningMessage('[ActivityWatch] 已断开连接，点击右下角 AW 状态可查看详情并重连。');
+            return;
+        }
+        if (state === 'connected' && previousState === 'disconnected') {
+            window.showInformationMessage('[ActivityWatch] 已重新连接并恢复推送。');
+        }
+    }
+
+    private _markConnected() {
+        this._setConnectionState('connected');
+    }
+
+    private _markDisconnected(message: string, showCriticalError: boolean) {
+        this._setConnectionState('disconnected', message);
+        if (showCriticalError) {
+            this._handleError(message, true);
+        }
+    }
+
+    private _getConnectionStateLabel(): string {
+        if (this._connectionState === 'connected') {
+            return '已连接';
+        }
+        if (this._connectionState === 'connecting') {
+            return '连接中';
+        }
+        return '已断开';
+    }
+
+    private _asError(err: unknown): Error {
+        if (err instanceof Error) {
+            return err;
+        }
+        if (typeof err === 'string') {
+            return new Error(err);
+        }
+        const candidate = err as { message?: unknown };
+        if (typeof candidate.message === 'string') {
+            return new Error(candidate.message);
+        }
+        return new Error('Unknown error');
     }
 
     private _handleError(err: string, isCritical: boolean = false): undefined {

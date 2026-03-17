@@ -8,7 +8,7 @@ This document describes the reporting model for `aw-watcher-vscode`.
   - Continuous heartbeat bucket for unified file activity in Cursor / VS Code.
   - Reading / dwell and active editing are both stored here, distinguished by `activityKind`.
 - `com.activitywatch.cursor.agent.lifecycle`
-  - Discrete Cursor Agent lifecycle events.
+  - Discrete user message events emitted by project-level Cursor Hooks.
 - `com.activitywatch.cursor.git.commit`
   - Discrete git commit summary archive events.
 
@@ -31,23 +31,10 @@ All events follow the ActivityWatch schema:
 
 ### Agent Event Data
 
-- `project`
-- `file`
-- `language`
-- `branch`
-- `workspaceId`
-- `eventName` (`panel_open` | `task_start` | `task_end` | `patch_apply` | `patch_reject`)
-- `taskKind` (`explain` | `fix` | `refactor` | `test_gen` | `ask` | `unknown`)
-- `source` (`shortcut` | `command_palette` | `context_menu` | `unknown`)
-- `outcome` (`accepted` | `rejected` | `partial` | `success` | `failed` | `unknown`)
-- `sessionId`
-- `commandId`
-- `mappingVersion`
-- `selectedChars`
-- `touchedFiles`
-- `deltaAdded`
-- `deltaDeleted`
-- `latencyMs`
+- `eventName` (`before_submit_prompt`)
+- `conversationId` (used to group multiple messages under one conversation)
+- `workspaceRoots` (current workspace root list)
+- `body` (full submitted user text)
 
 ### Commit Archive Event Data
 
@@ -63,7 +50,6 @@ All events follow the ActivityWatch schema:
 - `commitDate`
 - `subject`
 - `body`
-- `relatedAgentSessionId`
 
 ## Trigger Conditions
 
@@ -80,7 +66,9 @@ All events follow the ActivityWatch schema:
 
 ### Agent Events
 
-- `commands.onDidExecuteCommand` is mapped to lifecycle events.
+- Triggered by Cursor Hooks, not by the VS Code extension host.
+- The extension auto-installs its bundled `.cursor/hooks.json` and `.cursor/hooks/*` files into Cursor's global hooks directory at startup.
+- `beforeSubmitPrompt` records one `before_submit_prompt` event per submitted prompt.
 - Agent events are inserted as discrete events, not heartbeats.
 
 ### Commit Events
@@ -104,7 +92,7 @@ All events follow the ActivityWatch schema:
 - `npm run report:agent`
   - Outputs aggregate counts by event/task kind/outcome/command.
 - `npm run report:commits`
-  - Outputs `project -> commits`, `commitHash -> summary`, `agentSession -> commits` indexes.
+  - Outputs `project -> commits` and `commitHash -> summary` indexes.
 
 ## Test Timeline Script
 

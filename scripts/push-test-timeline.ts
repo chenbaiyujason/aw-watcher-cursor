@@ -4,7 +4,6 @@
  * 模型：
  *   - 单条文件活动轨道（fileActivity）：查看与编辑统一，文件切换自然切段。
  *   - 单条 commit 轨道（gitCommit）：60 秒里程碑事件。
- *   - agent 轨道（agentLifecycle）：离散点事件。
  *
  * 场景（从 30 分钟前开始模拟）：
  *   1. 打开 a.ts，阅读 6 分钟，再零星编辑 4 分钟
@@ -21,12 +20,24 @@ import {
     WATCHER_CLIENT_NAME,
     FileActivityKind,
     IFileActivityEventData,
-    IAgentEventData,
     ICommitArchiveEventData
 } from '../src/events';
 import { hostname } from 'os';
 
 const AW_BASE = 'http://localhost:5600';
+
+interface IRequestInitLike {
+    method: string;
+    headers: { [key: string]: string };
+    body?: string;
+}
+
+interface IFetchResponseLike {
+    status: number;
+    json(): Promise<unknown>;
+}
+
+declare function fetch(url: string, init?: IRequestInitLike): Promise<IFetchResponseLike>;
 
 // ------ HTTP 工具 ------
 
@@ -35,7 +46,7 @@ async function requestJson<TBody>(
     url: string,
     body?: TBody
 ): Promise<{ status: number; data: unknown }> {
-    const options: RequestInit = {
+    const options: IRequestInitLike = {
         method,
         headers: { 'Content-Type': 'application/json' }
     };
@@ -114,7 +125,6 @@ async function insertEvent(
 
 const HOST = hostname();
 const FILE_ACTIVITY_BUCKET = `test-${WATCHER_CLIENT_NAME}-${BUCKET_DEFINITIONS.fileActivity.suffix}_${HOST}`;
-const AGENT_BUCKET = `test-${WATCHER_CLIENT_NAME}-${BUCKET_DEFINITIONS.agentLifecycle.suffix}_${HOST}`;
 const COMMIT_BUCKET = `test-${WATCHER_CLIENT_NAME}-${BUCKET_DEFINITIONS.gitCommit.suffix}_${HOST}`;
 
 // 与真实扩展一致的 timing 参数，避免产生大量 0 秒碎片事件。
@@ -161,7 +171,6 @@ async function main() {
     // 1. 清除旧的测试 bucket。
     console.log('正在清除旧测试 bucket...');
     await deleteBucketIfExists(FILE_ACTIVITY_BUCKET);
-    await deleteBucketIfExists(AGENT_BUCKET);
     await deleteBucketIfExists(COMMIT_BUCKET);
     console.log();
 
@@ -170,11 +179,6 @@ async function main() {
     await createBucket(FILE_ACTIVITY_BUCKET, {
         client: `test-${WATCHER_CLIENT_NAME}`,
         type: BUCKET_DEFINITIONS.fileActivity.eventType,
-        hostname: HOST
-    });
-    await createBucket(AGENT_BUCKET, {
-        client: `test-${WATCHER_CLIENT_NAME}`,
-        type: BUCKET_DEFINITIONS.agentLifecycle.eventType,
         hostname: HOST
     });
     await createBucket(COMMIT_BUCKET, {
@@ -218,30 +222,6 @@ async function main() {
     const testingGapMs = 90 * 1000;
     console.log(`  [测试] 切出 IDE 运行测试（${testingGapMs / 1000} 秒停顿）...`);
 
-    // 在离开前推送一个 agent 事件（任务启动）。
-    const agentEventTime = new Date(phase3Start.getTime() + phase3DurationMs - 5000);
-    const agentData: IAgentEventData = {
-        project: '/test/my-project',
-        file: `/test/my-project/src/a.ts`,
-        language: 'typescript',
-        branch: 'main',
-        workspaceId: 'my-project',
-        eventName: 'task_start',
-        taskKind: 'fix',
-        source: 'shortcut',
-        outcome: 'unknown',
-        sessionId: 'agent_test_001',
-        commandId: 'cursor.agent.run',
-        mappingVersion: 'v1',
-        selectedChars: 120,
-        touchedFiles: 2,
-        deltaAdded: 15,
-        deltaDeleted: 3,
-        latencyMs: 320
-    };
-    await insertEvent(AGENT_BUCKET, agentEventTime, 0, agentData as unknown as Record<string, unknown>);
-    console.log(`  [agent] 插入 task_start 事件。`);
-
     // 阶段五：回到 b.ts，修测试反馈（4 分钟）
     const phase5Start = new Date(phase3Start.getTime() + phase3DurationMs + testingGapMs);
     const phase5DurationMs = 4 * 60 * 1000;
@@ -265,15 +245,13 @@ async function main() {
         authorDate: commitTime.toISOString(),
         commitDate: commitTime.toISOString(),
         subject: 'feat: 完成功能并修复 bug',
-        body: '',
-        relatedAgentSessionId: 'agent_test_001'
+        body: ''
     };
     await insertEvent(COMMIT_BUCKET, commitTime, 60, commitData as unknown as Record<string, unknown>);
     console.log(`  [commit] 插入 60 秒提交里程碑事件。`);
 
     console.log('\n✅ 测试数据推送完毕！');
     console.log(`  fileActivity bucket : ${FILE_ACTIVITY_BUCKET}`);
-    console.log(`  agentLifecycle bucket: ${AGENT_BUCKET}`);
     console.log(`  gitCommit bucket    : ${COMMIT_BUCKET}`);
     console.log(`\n请在 ActivityWatch Web UI 中选择这些 bucket 查看效果。`);
 }

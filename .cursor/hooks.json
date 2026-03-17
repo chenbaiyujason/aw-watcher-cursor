@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "hooks": {
+    "beforeSubmitPrompt": [
+      {
+        "command": "node .cursor/hooks/agent-report.cjs",
+        "timeout": 10
+      }
+    ]
+  }
+}

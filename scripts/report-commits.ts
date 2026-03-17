@@ -12,7 +12,6 @@ interface ICommitArchiveEventData {
     branch: string;
     subject: string;
     body: string;
-    relatedAgentSessionId: string;
     commitDate: string;
 }
 
@@ -24,7 +23,6 @@ interface ICommitIndexEntry {
     subject: string;
     body: string;
     commitDate: string;
-    relatedAgentSessionId: string;
 }
 
 interface ICommitReportOutput {
@@ -34,7 +32,6 @@ interface ICommitReportOutput {
     end: string;
     commitsByProject: { [project: string]: string[] };
     commitsByHash: { [commitHash: string]: ICommitIndexEntry };
-    commitsByAgentSession: { [sessionId: string]: string[] };
 }
 
 function getArgValue(flag: string): string | undefined {
@@ -90,8 +87,6 @@ async function main() {
 
     const commitsByHash: { [commitHash: string]: ICommitIndexEntry } = {};
     const commitsByProject: { [project: string]: string[] } = {};
-    const commitsByAgentSession: { [sessionId: string]: string[] } = {};
-
     events.forEach((event: IEvent) => {
         if (!isCommitArchiveEventData(event.data)) {
             return;
@@ -104,11 +99,9 @@ async function main() {
             branch: data.branch || 'unknown',
             subject: data.subject || '',
             body: data.body || '',
-            commitDate: data.commitDate || '',
-            relatedAgentSessionId: data.relatedAgentSessionId || 'unknown'
+            commitDate: data.commitDate || ''
         };
         pushUnique(commitsByProject, data.project || 'unknown', data.commitHashFull);
-        pushUnique(commitsByAgentSession, data.relatedAgentSessionId || 'unknown', data.commitHashFull);
     });
 
     const report: ICommitReportOutput = {
@@ -117,8 +110,7 @@ async function main() {
         start: start.toISOString(),
         end: end.toISOString(),
         commitsByProject,
-        commitsByHash,
-        commitsByAgentSession
+        commitsByHash
     };
 
     fs.writeFileSync(outputFile, JSON.stringify(report, null, 2), { encoding: 'utf8' });

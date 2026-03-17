@@ -1,9 +1,11 @@
 import * as assert from 'assert';
 import {
-    createAgentEvent,
+    buildConnectionStatusPresentation,
+    formatTimestamp
+} from '../connection-status';
+import {
     createCommitArchiveEvent,
-    createFileActivityEvent,
-    createSessionId
+    createFileActivityEvent
 } from '../events';
 
 describe('events helpers', () => {
@@ -26,31 +28,6 @@ describe('events helpers', () => {
         assert.strictEqual(event.data.activityKind, 'dwell');
     });
 
-    it('createAgentEvent 应保留命令映射字段', () => {
-        const event = createAgentEvent({
-            project: 'proj',
-            file: 'file.ts',
-            language: 'typescript',
-            branch: 'main',
-            workspaceId: 'ws',
-            eventName: 'task_start',
-            taskKind: 'ask',
-            source: 'unknown',
-            outcome: 'unknown',
-            sessionId: 'agent_1',
-            commandId: 'cursor.agent.run',
-            mappingVersion: 'v1',
-            selectedChars: 10,
-            touchedFiles: 1,
-            deltaAdded: 0,
-            deltaDeleted: 0,
-            latencyMs: 0
-        });
-        assert.ok(event.timestamp instanceof Date);
-        assert.strictEqual(event.data.eventName, 'task_start');
-        assert.strictEqual(event.data.commandId, 'cursor.agent.run');
-    });
-
     it('createCommitArchiveEvent 默认时长应为 60 秒，在时间线上显眼', () => {
         const event = createCommitArchiveEvent({
             project: 'proj',
@@ -67,15 +44,34 @@ describe('events helpers', () => {
             authorDate: '2026-03-06T00:00:00Z',
             commitDate: '2026-03-06T00:00:00Z',
             subject: 'feat: test',
-            body: '',
-            relatedAgentSessionId: 'unknown'
+            body: ''
         });
         assert.strictEqual(event.duration, 60);
     });
+});
 
-    it('createSessionId 应生成带前缀的唯一 id', () => {
-        const id = createSessionId('agent');
-        assert.ok(id.indexOf('agent_') === 0);
-        assert.ok(id.length > 10);
+describe('connection status helpers', () => {
+    it('buildConnectionStatusPresentation 应返回已连接文案', () => {
+        const presentation = buildConnectionStatusPresentation({
+            state: 'connected',
+            lastSuccessfulContactAtMs: Date.parse('2026-03-17T12:00:00.000Z'),
+            lastErrorMessage: ''
+        });
+        assert.strictEqual(presentation.text, '$(pass-filled) AW 已连接');
+        assert.ok(presentation.tooltip.indexOf('最近成功通信：2026-03-17T12:00:00.000Z') !== -1);
+    });
+
+    it('buildConnectionStatusPresentation 应返回断开时的错误摘要', () => {
+        const presentation = buildConnectionStatusPresentation({
+            state: 'disconnected',
+            lastSuccessfulContactAtMs: 0,
+            lastErrorMessage: 'connect ECONNREFUSED'
+        });
+        assert.strictEqual(presentation.text, '$(warning) AW 已断开');
+        assert.ok(presentation.tooltip.indexOf('最近错误：connect ECONNREFUSED') !== -1);
+    });
+
+    it('formatTimestamp 在无成功连接记录时应给出默认文案', () => {
+        assert.strictEqual(formatTimestamp(0), '尚未成功连接');
     });
 });

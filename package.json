@@ -2,7 +2,7 @@
     "name": "aw-watcher-cursor",
     "displayName": "aw-watcher-cursor",
     "description": "Editor watcher for ActivityWatch, the free and open-source automated time tracker.",
-    "version": "0.7.0",
+    "version": "1.0.0",
     "repository": {
         "type": "git",
         "url": "https://github.com/chenbaiyujason/aw-watcher-cursor"
@@ -36,8 +36,12 @@
                 "title": "Reload ActivityWatch"
             },
             {
-                "command": "extension.showAgentCommandMapping",
-                "title": "Show ActivityWatch Agent Command Mapping"
+                "command": "aw-watcher-vscode.showConnectionStatus",
+                "title": "Show ActivityWatch Connection Status"
+            },
+            {
+                "command": "aw-watcher-vscode.reconnect",
+                "title": "Reconnect ActivityWatch"
             }
         ],
         "configuration": {
@@ -64,11 +68,6 @@
                     "default": 750,
                     "description": "Debounces immediate text-change driven heartbeat refreshes."
                 },
-                "aw-watcher-vscode.enableAgentReport": {
-                    "type": "boolean",
-                    "default": true,
-                    "description": "Enable sending Cursor agent activity events."
-                },
                 "aw-watcher-vscode.enableCommitArchive": {
                     "type": "boolean",
                     "default": true,
@@ -83,38 +82,6 @@
                     "type": "boolean",
                     "default": false,
                     "description": "Include git author name and email in commit archive."
-                },
-                "aw-watcher-vscode.mappingVersion": {
-                    "type": "string",
-                    "default": "v1",
-                    "description": "Version label for agent command mapping."
-                },
-                "aw-watcher-vscode.agentCommandMapping": {
-                    "type": "object",
-                    "default": {
-                        "panelOpen": [
-                            "cursor.agent.open",
-                            "cursor.chat.open"
-                        ],
-                        "taskStart": [
-                            "cursor.agent.run",
-                            "cursor.chat.send",
-                            "cursor.agent.ask"
-                        ],
-                        "taskEnd": [
-                            "cursor.agent.stop",
-                            "cursor.chat.stop"
-                        ],
-                        "patchApply": [
-                            "cursor.agent.apply",
-                            "cursor.chat.apply"
-                        ],
-                        "patchReject": [
-                            "cursor.agent.reject",
-                            "cursor.chat.reject"
-                        ]
-                    },
-                    "description": "Agent command mapping object. Each key is an array of command patterns."
                 }
             }
         }
